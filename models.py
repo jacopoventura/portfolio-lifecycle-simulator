@@ -32,6 +32,14 @@ class Config:
     mc_bond_yield_std_percent: float
     mc_target_success_percent: int
     mc_inflation_ar1_phi: float = 0.0
+    mc_decumulation_years: int = 40
+    mc_decumulation_stock_pct: float = 0.40  # derived from bonds_percentage; kept for override
+    mc_decumulation_stock_return: float = 0.05
+    mc_decumulation_n_simulations: int = 10_000
+    mc_decumulation_pension_start_year: int = 15
+    mc_decumulation_pension_monthly: float = 2_500.0
+    mc_decumulation_glide_end_pct: float = 0.0   # stock% at end of glide (0 = no glide)
+    mc_decumulation_glide_years: int = 0          # years to complete glide (0 = no glide)
     mc_grid_cagr_min: float = 0.03
     mc_grid_cagr_max: float = 0.09
     mc_grid_cagr_step: float = 0.01
@@ -77,6 +85,20 @@ class Config:
             mc_grid_cagr_max=float(config.get("mc_grid_cagr_max", 0.09)),
             mc_grid_cagr_step=float(config.get("mc_grid_cagr_step", 0.01)),
             mc_inflation_ar1_phi=float(config.get("mc_inflation_ar1_phi", 0.0)),
+            mc_decumulation_years=int(config.get("mc_decumulation_years", 40)),
+            mc_decumulation_stock_pct=float(config.get(
+                "mc_decumulation_stock_pct",
+                1.0 - float(config["bonds_percentage"]) / 100.0,
+            )),
+            mc_decumulation_stock_return=float(config.get("mc_decumulation_stock_return", 0.05)),
+            mc_decumulation_n_simulations=int(config.get("mc_decumulation_n_simulations", 10_000)),
+            mc_decumulation_pension_start_year=int(config.get("mc_decumulation_pension_start_year", 15)),
+            mc_decumulation_pension_monthly=float(config.get("mc_decumulation_pension_monthly", 2_500.0)),
+            mc_decumulation_glide_end_pct=float(config.get(
+                "mc_decumulation_glide_end_pct",
+                1.0 - float(config["bonds_percentage"]) / 100.0,  # default = start = no glide
+            )),
+            mc_decumulation_glide_years=int(config.get("mc_decumulation_glide_years", 0)),
             mc_grid_n_simulations=int(config.get("mc_grid_n_simulations", 15_000)),
             mc_grid_contribution_max=float(config.get("mc_grid_contribution_max", 7_000.0)),
         )
@@ -276,3 +298,57 @@ class ContributionCagrGrid:
     contribution_values: list[float]   # stock monthly € axis
     suggested_contribution: float      # unrounded deterministic suggestion
     grid: list[list[CagrContributionCell]]  # [cagr_idx][contrib_idx]
+
+
+@dataclass
+class DecumulationResult:
+    n_simulations: int
+    n_years: int
+    withdrawal_strategy: str           # "fixed" | "guyton_klinger"
+    initial_portfolio: float
+    initial_monthly_withdrawal: float
+    stock_allocation: float
+    survival_rate: float               # P(portfolio > 0 at year n_years)
+    survival_by_year: list[float]      # length n_years
+    portfolio_percentiles_by_year: list[dict[int, float]]   # {3,25,50,75,97} per year
+    withdrawal_percentiles_by_year: list[dict[int, float]]  # {10,50,90} per year
+    ruin_year_median: int | None       # median year of ruin among failed sims
+
+
+@dataclass
+class SORRResult:
+    baseline: "DecumulationResult"
+    stress_scenarios: list[tuple[str, "DecumulationResult"]]  # (label, result)
+
+
+@dataclass
+class JointProbabilityResult:
+    accumulation_p50: float
+    accumulation_tail: float
+    tail_pct: int
+    p_survive_from_p50: float
+    p_survive_from_tail: float
+    joint_p50: float    # 0.50 × p_survive_from_p50
+    joint_tail: float   # tail_pct/100 × p_survive_from_tail
+
+
+@dataclass
+class AllocationSweepPoint:
+    bonds_pct: float            # bonds allocation at retirement start
+    stock_pct_start: float      # = 1 - bonds_pct (glide path start)
+    required_portfolio: float   # deterministic required portfolio for this allocation
+    net_income_rate: float      # portfolio net income rate
+    survival_yr20_fixed: float
+    survival_yr30_fixed: float
+    survival_yr30_gk: float
+    survival_yr35_gk: float
+    survival_yr40_gk: float
+
+
+@dataclass
+class AllocationSweepResult:
+    points: list[AllocationSweepPoint]
+    optimal_bonds_pct: float    # bonds_pct with highest survival_yr30_gk
+    glide_end_pct: float        # stock% at end of glide
+    glide_years: int            # years to complete glide
+    base_bonds_pct: float       # bonds_pct from config (current plan)

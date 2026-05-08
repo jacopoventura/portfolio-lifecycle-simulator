@@ -8,6 +8,8 @@ import numpy as np
 from finance import cash_converted_to_bonds_at_horizon, calculate_required_monthly_contribution
 from models import (
     AllocationGridPoint,
+    AllocationSweepPoint,
+    AllocationSweepResult,
     BondStockCell,
     BondStockGrid,
     CagrContributionCell,
@@ -15,12 +17,15 @@ from models import (
     CombinedGridCell,
     Config,
     ContributionCagrGrid,
+    DecumulationResult,
     FinancialFreedomResult,
+    JointProbabilityResult,
     MonteCarloResult,
     OptimalAllocationResult,
     ScenarioResult,
     SensitivityEntry,
     SensitivityWaterfallResult,
+    SORRResult,
 )
 
 _SENSITIVITY_N_SIMULATIONS = 10_000
@@ -906,3 +911,434 @@ def compute_stock_allocation_sweep(
         })
         extra += 50_000.0
     return results
+
+
+# ── Decumulation MC ───────────────────────────────────────────────────────────
+
+_SORR_SEQUENCES: list[tuple[str, list[float]]] = [
+    ("Forced crash (yr 1-5)",  [-0.30, -0.15, +0.10, +0.05, +0.08]),
+    ("Historical 2000-2002",   [-0.09, -0.12, -0.22]),
+    ("Historical 2008-2009",   [-0.37, +0.26]),
+]
+
+
+def _run_decum_loop(
+    annual_stock_returns: np.ndarray,
+    annual_inflations: np.ndarray,
+    annual_bond_yields: np.ndarray,
+    initial_stock_v: np.ndarray,
+    initial_bond_v: np.ndarray,
+    initial_monthly_wd: float,
+    n_years: int,
+    withdrawal_strategy: str,
+    bond_tax_rate: float,
+    pension_monthly: float,
+    pension_start_year: int,
+    stock_pct_end: float = -1.0,
+    glide_years: int = 0,
+) -> DecumulationResult:
+    """Core decumulation year-loop. All simulation work is vectorised.
+
+    Glide path: when glide_years > 0, stock allocation linearly shifts from the
+    initial fraction toward stock_pct_end over glide_years years, then stays fixed.
+    Annual rebalancing runs after stock growth, before withdrawals.
+    """
+    n_sims = len(initial_stock_v)
+    stock_v = initial_stock_v.copy()
+    bond_v = initial_bond_v.copy()
+    initial_total = float(initial_stock_v[0] + initial_bond_v[0])
+    initial_annual_wd = initial_monthly_wd * 12.0
+    stock_pct_start = float(initial_stock_v[0] / initial_total) if initial_total > 0 else 0.0
+    stock_allocation = stock_pct_start
+    _glide_active = glide_years > 0 and stock_pct_end >= 0.0 and stock_pct_end != stock_pct_start
+
+    alive = np.ones(n_sims, dtype=bool)
+    cum_inf = np.ones(n_sims)
+    gk_multiplier = np.ones(n_sims)
+    ruin_years = np.full(n_sims, -1, dtype=int)
+
+    pension_annual = pension_monthly * 12.0
+    _PCTS = (3, 25, 50, 75, 97)
+
+    survival_by_year: list[float] = []
+    portfolio_pcts_by_year: list[dict[int, float]] = []
+    withdrawal_pcts_by_year: list[dict[int, float]] = []
+
+    for year in range(n_years):
+        # 1. Grow stocks (bonds stay at par — coupon extracted below)
+        stock_fv, _ = _vec_annuity_factor(annual_stock_returns[:, year])
+        stock_v = stock_v * stock_fv
+
+        # 2. Bond coupon: yield × principal × (1 − tax), net annual income
+        bond_coupon = bond_v * np.maximum(annual_bond_yields[:, year], 0.0) * (1.0 - bond_tax_rate)
+
+        # 3. Cumulative inflation (per-simulation, AR(1) model)
+        cum_inf = cum_inf * (1.0 + annual_inflations[:, year])
+
+        # 3b. Glide path rebalancing (after growth, before withdrawals)
+        if _glide_active:
+            progress = min(year + 1, glide_years) / glide_years
+            target_frac = stock_pct_start + (stock_pct_end - stock_pct_start) * progress
+            total_v = stock_v + bond_v
+            rebalance_mask = alive & (total_v > 0.0)
+            stock_v = np.where(rebalance_mask, total_v * target_frac, stock_v)
+            bond_v  = np.where(rebalance_mask, total_v * (1.0 - target_frac), bond_v)
+
+        # 4. Inflation-adjusted target and pension income
+        target_annual = initial_annual_wd * cum_inf
+        pension_income = pension_annual if year >= pension_start_year else 0.0
+
+        # 5. Guyton-Klinger adjustment on total target
+        if withdrawal_strategy == "guyton_klinger":
+            portfolio_total = stock_v + bond_v
+            baseline = initial_total * cum_inf
+            cut_mask = alive & (portfolio_total < 0.80 * baseline)
+            raise_mask = alive & (portfolio_total > 1.20 * baseline)
+            gk_multiplier = np.where(cut_mask, gk_multiplier * 0.90, gk_multiplier)
+            gk_multiplier = np.where(raise_mask, gk_multiplier * 1.10, gk_multiplier)
+            gk_multiplier = np.clip(gk_multiplier, 0.85, 1.20)
+            target_annual = target_annual * gk_multiplier
+
+        # 6. Residual from stocks after passive income; surplus is reinvested
+        passive_income = bond_coupon + pension_income
+        residual = np.maximum(0.0, target_annual - passive_income)
+        surplus = np.maximum(0.0, passive_income - target_annual)
+
+        # 7. Deduct / reinvest (alive sims only)
+        stock_v = stock_v - np.where(alive, residual, 0.0)
+        stock_v = stock_v + np.where(alive, surplus, 0.0)
+
+        # 8. Fallback: if stocks exhausted, sell bond principal to cover shortfall
+        shortfall = np.maximum(0.0, -stock_v)
+        stock_v = np.maximum(stock_v, 0.0)
+        bond_v = np.maximum(bond_v - np.where(alive, shortfall, 0.0), 0.0)
+
+        # 9. Detect ruin (both exhausted)
+        portfolio_total = stock_v + bond_v
+        newly_dead = alive & (portfolio_total <= 0.0)
+        ruin_years = np.where(newly_dead, year + 1, ruin_years)
+        alive = alive & (portfolio_total > 0.0)
+
+        # 10. Record
+        survival_by_year.append(float(np.mean(alive)))
+        portfolio_pcts_by_year.append(
+            {p: float(np.percentile(portfolio_total, p)) for p in _PCTS}
+        )
+        eff_wd = np.where(alive, (residual + passive_income) / 12.0, np.nan)
+        withdrawal_pcts_by_year.append(
+            {p: float(np.nanpercentile(eff_wd, p)) for p in (10, 50, 90)}
+        )
+
+    failed = ruin_years > 0
+    ruin_year_median = int(np.median(ruin_years[failed])) if np.any(failed) else None
+
+    return DecumulationResult(
+        n_simulations=n_sims,
+        n_years=n_years,
+        withdrawal_strategy=withdrawal_strategy,
+        initial_portfolio=initial_total,
+        initial_monthly_withdrawal=initial_monthly_wd,
+        stock_allocation=stock_allocation,
+        survival_rate=survival_by_year[-1],
+        survival_by_year=survival_by_year,
+        portfolio_percentiles_by_year=portfolio_pcts_by_year,
+        withdrawal_percentiles_by_year=withdrawal_pcts_by_year,
+        ruin_year_median=ruin_year_median,
+    )
+
+
+def simulate_decumulation(
+    config: Config,
+    initial_portfolio: float,
+    stock_allocation: float | None = None,
+    n_years: int | None = None,
+    stock_std: float | None = None,
+    inflation_std: float | None = None,
+    seed: int = 42,
+    n_simulations: int | None = None,
+    withdrawal_strategy: str = "fixed",
+    bond_tax_rate: float | None = None,
+    glide_end_pct: float | None = None,
+    glide_years: int | None = None,
+) -> DecumulationResult:
+    sa  = stock_allocation if stock_allocation is not None else config.mc_decumulation_stock_pct
+    ny  = n_years          if n_years          is not None else config.mc_decumulation_years
+    ss  = stock_std        if stock_std        is not None else config.mc_stock_return_std_percent / 100
+    is_ = inflation_std    if inflation_std    is not None else config.mc_inflation_std_percent / 100
+    n   = n_simulations    if n_simulations    is not None else config.mc_decumulation_n_simulations
+    btr = bond_tax_rate    if bond_tax_rate    is not None else config.tax_rate_bond_italy
+    gep = glide_end_pct    if glide_end_pct    is not None else config.mc_decumulation_glide_end_pct
+    gyr = glide_years      if glide_years      is not None else config.mc_decumulation_glide_years
+
+    rng = np.random.default_rng(seed)
+    stock_returns, inflations, bond_yields = _generate_mc_returns(
+        rng, n, ny,
+        config.mc_decumulation_stock_return, ss,
+        config.expected_inflation_percent / 100, is_,
+        config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
+        inflation_ar1_phi=config.mc_inflation_ar1_phi,
+    )
+    initial_stock_v = np.full(n, initial_portfolio * sa)
+    initial_bond_v  = np.full(n, initial_portfolio * (1.0 - sa))
+    initial_monthly_wd = initial_portfolio * (config.withdrawal_percentage_stock / 100) / 12.0
+
+    return _run_decum_loop(
+        annual_stock_returns=stock_returns,
+        annual_inflations=inflations,
+        annual_bond_yields=bond_yields,
+        initial_stock_v=initial_stock_v,
+        initial_bond_v=initial_bond_v,
+        initial_monthly_wd=initial_monthly_wd,
+        n_years=ny,
+        withdrawal_strategy=withdrawal_strategy,
+        bond_tax_rate=btr,
+        pension_monthly=config.mc_decumulation_pension_monthly,
+        pension_start_year=config.mc_decumulation_pension_start_year,
+        stock_pct_end=gep,
+        glide_years=gyr,
+    )
+
+
+def find_required_decumulation_portfolio(
+    config: Config,
+    stock_allocation: float | None = None,
+    target_survival: float | None = None,
+    stock_std: float | None = None,
+    inflation_std: float | None = None,
+    seed: int = 42,
+    n_simulations: int | None = None,
+    withdrawal_strategy: str = "fixed",
+    lo: float = 100_000.0,
+    hi: float = 10_000_000.0,
+    n_iter: int = 40,
+) -> float:
+    """Binary search for the minimum portfolio giving target survival rate."""
+    target = target_survival if target_survival is not None else config.mc_target_success_percent / 100
+
+    def _survival(portfolio: float) -> float:
+        return simulate_decumulation(
+            config=config, initial_portfolio=portfolio,
+            stock_allocation=stock_allocation, stock_std=stock_std,
+            inflation_std=inflation_std, seed=seed, n_simulations=n_simulations,
+            withdrawal_strategy=withdrawal_strategy,
+        ).survival_rate
+
+    if _survival(hi) < target:
+        return hi  # target unachievable in range
+
+    for _ in range(n_iter):
+        mid = (lo + hi) / 2.0
+        if _survival(mid) >= target:
+            hi = mid
+        else:
+            lo = mid
+
+    return (lo + hi) / 2.0
+
+
+def compute_sorr_scenarios(
+    config: Config,
+    initial_portfolio: float,
+    stock_allocation: float | None = None,
+    stock_std: float | None = None,
+    inflation_std: float | None = None,
+    seed: int = 42,
+    n_simulations: int | None = None,
+    withdrawal_strategy: str = "fixed",
+) -> SORRResult:
+    """Run baseline decumulation + three historical stress sequences."""
+    sa  = stock_allocation if stock_allocation is not None else config.mc_decumulation_stock_pct
+    ny  = config.mc_decumulation_years
+    ss  = stock_std     if stock_std     is not None else config.mc_stock_return_std_percent / 100
+    is_ = inflation_std if inflation_std is not None else config.mc_inflation_std_percent / 100
+    n   = n_simulations if n_simulations is not None else config.mc_decumulation_n_simulations
+
+    rng = np.random.default_rng(seed)
+    stock_returns, inflations, bond_yields = _generate_mc_returns(
+        rng, n, ny,
+        config.mc_decumulation_stock_return, ss,
+        config.expected_inflation_percent / 100, is_,
+        config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
+        inflation_ar1_phi=config.mc_inflation_ar1_phi,
+    )
+    initial_stock_v = np.full(n, initial_portfolio * sa)
+    initial_bond_v  = np.full(n, initial_portfolio * (1.0 - sa))
+    initial_monthly_wd = initial_portfolio * (config.withdrawal_percentage_stock / 100) / 12.0
+
+    _common = dict(
+        annual_inflations=inflations,
+        annual_bond_yields=bond_yields,
+        initial_stock_v=initial_stock_v,
+        initial_bond_v=initial_bond_v,
+        initial_monthly_wd=initial_monthly_wd,
+        n_years=ny,
+        withdrawal_strategy=withdrawal_strategy,
+        bond_tax_rate=config.tax_rate_bond_italy,
+        pension_monthly=config.mc_decumulation_pension_monthly,
+        pension_start_year=config.mc_decumulation_pension_start_year,
+        stock_pct_end=config.mc_decumulation_glide_end_pct,
+        glide_years=config.mc_decumulation_glide_years,
+    )
+
+    baseline = _run_decum_loop(annual_stock_returns=stock_returns, **_common)
+
+    stress_scenarios: list[tuple[str, DecumulationResult]] = []
+    for label, seq in _SORR_SEQUENCES:
+        patched = stock_returns.copy()
+        for t, r in enumerate(seq):
+            if t < ny:
+                patched[:, t] = r
+        stress_scenarios.append((label, _run_decum_loop(annual_stock_returns=patched, **_common)))
+
+    return SORRResult(baseline=baseline, stress_scenarios=stress_scenarios)
+
+
+def compute_joint_probability(
+    config: Config,
+    accumulation_p50: float,
+    accumulation_tail: float,
+    tail_pct: int,
+    stock_allocation: float | None = None,
+    stock_std: float | None = None,
+    inflation_std: float | None = None,
+    seed: int = 42,
+    n_simulations: int | None = None,
+) -> JointProbabilityResult:
+    """Chain accumulation percentile portfolios into decumulation survival rates."""
+    _kw = dict(
+        config=config, stock_allocation=stock_allocation,
+        stock_std=stock_std, inflation_std=inflation_std,
+        seed=seed, n_simulations=n_simulations,
+    )
+    dec_p50  = simulate_decumulation(initial_portfolio=accumulation_p50,  **_kw)
+    dec_tail = simulate_decumulation(initial_portfolio=accumulation_tail, **_kw)
+    return JointProbabilityResult(
+        accumulation_p50=accumulation_p50,
+        accumulation_tail=accumulation_tail,
+        tail_pct=tail_pct,
+        p_survive_from_p50=dec_p50.survival_rate,
+        p_survive_from_tail=dec_tail.survival_rate,
+        joint_p50=0.50 * dec_p50.survival_rate,
+        joint_tail=(tail_pct / 100.0) * dec_tail.survival_rate,
+    )
+
+
+def _survival_at_year(result: "DecumulationResult", year: int) -> float:
+    """Return survival rate at a specific year (1-based). Returns 0 if beyond horizon."""
+    if year <= 0 or year > result.n_years:
+        return 0.0
+    return result.survival_by_year[year - 1]
+
+
+def compute_allocation_sweep(
+    config: Config,
+    effective_stock_tax_rate: float | None = None,
+    bonds_pct_values: list[float] | None = None,
+    seed: int = 42,
+    n_simulations: int | None = None,
+) -> AllocationSweepResult:
+    """Sweep bonds% at retirement, run decumulation for each, find optimal allocation.
+
+    For each bonds_pct:
+      1. Compute required portfolio deterministically (income formula).
+      2. Run fixed-withdrawal and Guyton-Klinger decumulation at that portfolio,
+         with glide path from (1-bonds_pct) down to config.mc_decumulation_glide_end_pct.
+      3. Record survival at key years.
+
+    All allocations share the same random draws (same seed) so differences in survival
+    rates reflect allocation differences, not Monte Carlo noise.
+    """
+    if bonds_pct_values is None:
+        bonds_pct_values = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+
+    # Effective tax on stock withdrawals. Conservative default: 65% gain fraction.
+    if effective_stock_tax_rate is None:
+        effective_stock_tax_rate = 0.65 * config.teilfreistellung * config.tax_rate
+
+    ny  = config.mc_decumulation_years
+    n   = n_simulations if n_simulations is not None else min(
+        config.mc_decumulation_n_simulations, 5_000
+    )
+    btr = config.tax_rate_bond_italy
+    glide_end = config.mc_decumulation_glide_end_pct
+    glide_yrs = config.mc_decumulation_glide_years
+
+    # Income target at retirement in nominal terms
+    inflation_factor = (1.0 + config.expected_inflation_percent / 100.0) ** int(round(config.years))
+    target_annual = config.target_monthly_retirement_income * inflation_factor * 12.0
+
+    # Generate ONE set of random draws shared across all allocations
+    rng = np.random.default_rng(seed)
+    stock_returns, inflations, bond_yields = _generate_mc_returns(
+        rng, n, ny,
+        config.mc_decumulation_stock_return,
+        config.mc_stock_return_std_percent / 100,
+        config.expected_inflation_percent / 100,
+        config.mc_inflation_std_percent / 100,
+        config.yield_bonds / 100,
+        config.mc_bond_yield_std_percent / 100,
+        inflation_ar1_phi=config.mc_inflation_ar1_phi,
+    )
+
+    wd_rate = config.withdrawal_percentage_stock / 100.0
+    bond_yield = config.yield_bonds / 100.0
+    points: list[AllocationSweepPoint] = []
+
+    for bonds_pct in bonds_pct_values:
+        stocks_w = 1.0 - bonds_pct
+        net_rate = (
+            bonds_pct * bond_yield * (1.0 - btr)
+            + stocks_w * wd_rate * (1.0 - effective_stock_tax_rate)
+        )
+        if net_rate <= 0:
+            continue
+        required_portfolio = target_annual / net_rate
+        stock_pct_start = stocks_w
+        # Only glide downward; if already at or below glide_end, no rebalancing
+        eff_glide_end = min(glide_end, stock_pct_start)
+        eff_glide_yrs = glide_yrs if stock_pct_start > glide_end else 0
+
+        initial_stock_v = np.full(n, required_portfolio * stock_pct_start)
+        initial_bond_v  = np.full(n, required_portfolio * bonds_pct)
+        initial_monthly_wd = required_portfolio * wd_rate / 12.0
+
+        _loop_kw = dict(
+            annual_inflations=inflations,
+            annual_bond_yields=bond_yields,
+            initial_stock_v=initial_stock_v,
+            initial_bond_v=initial_bond_v,
+            initial_monthly_wd=initial_monthly_wd,
+            n_years=ny,
+            bond_tax_rate=btr,
+            pension_monthly=config.mc_decumulation_pension_monthly,
+            pension_start_year=config.mc_decumulation_pension_start_year,
+            stock_pct_end=eff_glide_end,
+            glide_years=eff_glide_yrs,
+        )
+        r_fixed = _run_decum_loop(
+            annual_stock_returns=stock_returns, withdrawal_strategy="fixed", **_loop_kw
+        )
+        r_gk = _run_decum_loop(
+            annual_stock_returns=stock_returns, withdrawal_strategy="guyton_klinger", **_loop_kw
+        )
+
+        points.append(AllocationSweepPoint(
+            bonds_pct=bonds_pct,
+            stock_pct_start=stock_pct_start,
+            required_portfolio=required_portfolio,
+            net_income_rate=net_rate,
+            survival_yr20_fixed=_survival_at_year(r_fixed, 20),
+            survival_yr30_fixed=_survival_at_year(r_fixed, 30),
+            survival_yr30_gk=_survival_at_year(r_gk, 30),
+            survival_yr35_gk=_survival_at_year(r_gk, 35),
+            survival_yr40_gk=_survival_at_year(r_gk, 40),
+        ))
+
+    optimal = max(points, key=lambda p: p.survival_yr30_gk)
+    return AllocationSweepResult(
+        points=points,
+        optimal_bonds_pct=optimal.bonds_pct,
+        glide_end_pct=glide_end,
+        glide_years=glide_yrs,
+        base_bonds_pct=config.bonds_percentage / 100.0,
+    )

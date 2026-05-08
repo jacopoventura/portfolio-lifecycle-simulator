@@ -3,13 +3,7 @@
 
                                                                                    
   ┌─────┬──────────────────────────────────────┬────────────────────────────────────────────────────────┐
-  │  #  │               Feature                │          Why it matters for you specifically           │                                                                   
-  ├─────┼──────────────────────────────────────┼────────────────────────────────────────────────────────────┤
-  │ 1   │ Decumulation MC (35–40yr)            │ Verifies 3.3% SWR survives your actual horizon             │                                                               
-  ├─────┼──────────────────────────────────────┼────────────────────────────────────────────────────────────┤
-  │ 2   │ SORR visibility in decumulation      │ Your biggest single risk at age 54                         │                                                               
-  ├─────┼──────────────────────────────────────┼────────────────────────────────────────────────────────────┤
-  │ 3   │ Variable withdrawal (Guyton-Klinger) │ Dramatically improves 40yr survival rates vs fixed SWR     │
+  │  #  │               Feature                │          Why it matters for you specifically           │                                                                      │
   ├─────┼──────────────────────────────────────┼────────────────────────────────────────────────────────────┤                                                               
   │ 4   │ ETF → CAGR bridge                    │ Makes accumulation assumptions evidence-based              │                                                               
   ├─────┼──────────────────────────────────────┼────────────────────────────────────────────────────────────┤                                                               
@@ -35,7 +29,7 @@ mc_inflation_ar1_phi=0.6 (config) — phi=0 recovers original model exactly (sam
 
 # ── CORE COMPLETENESS ─────────────────────────────────────────────────────────
 
-## P3 · Decumulation MC — 35–40 year horizon  ← most important missing feature
+## ✓ P3 · Decumulation MC — 35–40 year horizon  [DONE]
 User retires at 54. No pension. Portfolio must last 35–40 years, not 20–25.
 What to build:
   - simulate_decumulation(portfolio, monthly_withdrawal, n_years, stock_std, ...) → MC over withdrawal phase
@@ -48,13 +42,13 @@ What to build:
   - Decumulation horizon config field: mc_decumulation_years (default 40)
 Note: update TODO note — horizon is 35–40yr (age 54→94), not 30yr as previously written.
 
-## P4 · SORR visibility in decumulation
+## ✓ P4 · SORR visibility in decumulation  [DONE — see section 4.5]
 Sequence-of-returns risk is the dominant risk at age 54: a crash in year 1–5 of retirement
 permanently impairs the portfolio even if long-run returns are fine.
 Show in decumulation report: success rate conditioned on a bad first decade (e.g. -30% in yr 1).
 Historical scenario: overlay 2000–2002 and 2008–2009 sequences on the decumulation MC.
 
-## P5 · Joint probability — P(accumulate AND survive 40yr)
+## ✓ P5 · Joint probability — P(accumulate AND survive 40yr)  [DONE — see section 4.6]
 Single most important output for retirement planning. No classical tool computes this.
 Once P3 is done: chain accumulation MC output → decumulation MC input, report joint probability.
 The number to headline: "P(retire by 2041 AND portfolio lasts to age 94) = X%"
@@ -87,23 +81,12 @@ Data already available via main_cagr_analysis.py / yfinance.
 Shows: "if you had started investing in the worst year of the last 30, would your plan survive?"
 Separate from MC — deterministic but uses real data. Very concrete and relatable.
 
-## P10 · Glide path / dynamic allocation in decumulation
-Fixed 60/40 allocation throughout a 40-year retirement is wrong.
-At 54, still need growth — 70% stocks may be correct. Gradually shift to 50% by 74.
-Simulate glide path in decumulation MC: stock% decreases linearly with age.
-Config: decumulation_stock_pct_start, decumulation_stock_pct_end, glide_years.
-
-
-## P11 · Retirement stock/bond allocation optimiser
-`bonds_percentage` is currently a fixed config param (60%), but the optimal split at retirement
-directly affects both the required amount targets and the portfolio_net_income_rate.
-What to build:
-  - Scan bonds_percentage ∈ [20%, 80%] in steps of 5%
-  - For each value: rebuild the scenario, run MC with the income metric
-  - Return the income success rate curve and the peak bonds_percentage
-  - Report: one-line summary "optimal bonds% at retirement = X% (income success = Y%)"
-Most useful as a decumulation input: the optimal accumulation-phase allocation feeds into P3/P10.
-~30 min to implement.
+## ✓ P10+P11 · Glide path + allocation optimiser  [DONE — see section 4.7]
+Annual rebalancing in _run_decum_loop: stock% declines linearly from starting allocation
+(= 1 - bonds_pct) to mc_decumulation_glide_end_pct over mc_decumulation_glide_years years.
+Joint sweep (compute_allocation_sweep) tests bonds_pct ∈ [20%–80%], same random draws,
+reports survival at yr20/30/35/40 for fixed and GK, optimal = max yr-30 GK survival.
+IT result: bond-heavy allocations win due to 12.5% bond tax (vs 26% stocks).
 
 
 # ── NICE TO HAVE ──────────────────────────────────────────────────────────────
