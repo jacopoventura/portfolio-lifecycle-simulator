@@ -166,6 +166,218 @@ class TestRunMonteCarloSimulation:
         assert r_high.required_portfolio_percentiles[50] > r_low.required_portfolio_percentiles[50]
 
 
+class TestStudentTFatTails:
+    _COMMON = dict(
+        n_simulations=2_000, years=15,
+        stock_mean=0.07, stock_std=0.15,
+        inflation_mean=0.02, inflation_std=0.02,
+        bonds_yield=0.03, bond_std=0.01,
+    )
+
+    def _rng(self, seed: int = 42) -> np.random.Generator:
+        return np.random.default_rng(seed)
+
+    def test_success_rate_in_range(self):
+        config = _make_config(mc_stock_return_df=5.0)
+        scenario = _make_scenario(config)
+        result = run_monte_carlo_simulation(
+            config=config, scenario=scenario,
+            n_simulations=500, stock_std=0.15, inflation_std=0.02, seed=42,
+        )
+        assert 0.0 <= result.success_rate <= 1.0
+
+    def test_deterministic_with_same_seed(self):
+        config = _make_config(mc_stock_return_df=5.0)
+        scenario = _make_scenario(config)
+        kwargs = dict(config=config, scenario=scenario, n_simulations=500,
+                      stock_std=0.15, inflation_std=0.02, seed=42)
+        r1 = run_monte_carlo_simulation(**kwargs)
+        r2 = run_monte_carlo_simulation(**kwargs)
+        assert r1.success_rate == r2.success_rate
+
+    def test_std_preserved(self):
+        """Student-t scaled draws should have std ≈ target std."""
+        rng = self._rng(0)
+        returns, _, _ = _generate_mc_returns(**self._COMMON, rng=rng, stock_return_df=5.0)
+        assert abs(float(np.std(returns)) - 0.15) < 0.015
+
+    def test_fatter_tails_than_normal(self):
+        """t(5) should produce more extreme negative returns at P1 than normal."""
+        rng_n = self._rng(1)
+        normal, _, _ = _generate_mc_returns(
+            **{**self._COMMON, "n_simulations": 50_000, "stock_mean": 0.0},
+            rng=rng_n, stock_return_df=1000.0,
+        )
+        rng_t = self._rng(1)
+        fat, _, _ = _generate_mc_returns(
+            **{**self._COMMON, "n_simulations": 50_000, "stock_mean": 0.0},
+            rng=rng_t, stock_return_df=5.0,
+        )
+        assert float(np.percentile(fat, 1)) < float(np.percentile(normal, 1))
+
+    def test_large_df_close_to_normal(self):
+        """df=1000 should behave statistically like normal."""
+        rng1 = self._rng(0)
+        r1, _, _ = _generate_mc_returns(**self._COMMON, rng=rng1, stock_return_df=1000.0)
+        rng2 = self._rng(0)
+        r2, _, _ = _generate_mc_returns(**self._COMMON, rng=rng2)
+        # Same seed → same underlying z_stock → results differ only due to RNG order
+        # Just check statistical proximity (mean and std should be very close)
+        assert abs(float(np.mean(r1)) - float(np.mean(r2))) < 0.01
+        assert abs(float(np.std(r1)) - float(np.std(r2))) < 0.01
+
+
+class TestStockBondCorrelation:
+    _COMMON = dict(
+        n_simulations=50_000, years=1,
+        stock_mean=0.05, stock_std=0.15,
+        inflation_mean=0.02, inflation_std=0.02,
+        bonds_yield=0.03, bond_std=0.10,
+    )
+
+    def _rng(self, seed: int = 42) -> np.random.Generator:
+        return np.random.default_rng(seed)
+
+    def test_success_rate_in_range(self):
+        config = _make_config(mc_stock_bond_correlation=-0.3)
+        scenario = _make_scenario(config)
+        result = run_monte_carlo_simulation(
+            config=config, scenario=scenario,
+            n_simulations=500, stock_std=0.15, inflation_std=0.02, seed=42,
+        )
+        assert 0.0 <= result.success_rate <= 1.0
+
+    def test_deterministic_with_same_seed(self):
+        config = _make_config(mc_stock_bond_correlation=-0.3)
+        scenario = _make_scenario(config)
+        kwargs = dict(config=config, scenario=scenario, n_simulations=500,
+                      stock_std=0.15, inflation_std=0.02, seed=42)
+        r1 = run_monte_carlo_simulation(**kwargs)
+        r2 = run_monte_carlo_simulation(**kwargs)
+        assert r1.success_rate == r2.success_rate
+
+    def test_negative_correlation_preserved(self):
+        """Empirical correlation should be close to the requested value."""
+        rng = self._rng(0)
+        stocks, _, bonds = _generate_mc_returns(**self._COMMON, rng=rng, stock_bond_corr=-0.5)
+        emp_corr = float(np.corrcoef(stocks[:, 0], bonds[:, 0])[0, 1])
+        assert abs(emp_corr - (-0.5)) < 0.02
+
+    def test_positive_correlation_preserved(self):
+        rng = self._rng(0)
+        stocks, _, bonds = _generate_mc_returns(**self._COMMON, rng=rng, stock_bond_corr=0.4)
+        emp_corr = float(np.corrcoef(stocks[:, 0], bonds[:, 0])[0, 1])
+        assert abs(emp_corr - 0.4) < 0.02
+
+    def test_zero_correlation_near_zero(self):
+        rng = self._rng(0)
+        stocks, _, bonds = _generate_mc_returns(**self._COMMON, rng=rng, stock_bond_corr=0.0)
+        emp_corr = float(np.corrcoef(stocks[:, 0], bonds[:, 0])[0, 1])
+        assert abs(emp_corr) < 0.03
+
+
+class TestStockReturnAR1:
+    _COMMON = dict(
+        n_simulations=2_000, years=15,
+        stock_mean=0.07, stock_std=0.15,
+        inflation_mean=0.02, inflation_std=0.02,
+        bonds_yield=0.03, bond_std=0.01,
+    )
+
+    def _rng(self, seed: int = 42) -> np.random.Generator:
+        return np.random.default_rng(seed)
+
+    def test_success_rate_in_range(self):
+        config = _make_config(mc_stock_return_ar1_phi=-0.25)
+        scenario = _make_scenario(config)
+        result = run_monte_carlo_simulation(
+            config=config, scenario=scenario,
+            n_simulations=500, stock_std=0.15, inflation_std=0.02, seed=42,
+        )
+        assert 0.0 <= result.success_rate <= 1.0
+
+    def test_deterministic_with_same_seed(self):
+        config = _make_config(mc_stock_return_ar1_phi=-0.25)
+        scenario = _make_scenario(config)
+        kwargs = dict(config=config, scenario=scenario, n_simulations=500,
+                      stock_std=0.15, inflation_std=0.02, seed=42)
+        r1 = run_monte_carlo_simulation(**kwargs)
+        r2 = run_monte_carlo_simulation(**kwargs)
+        assert r1.success_rate == r2.success_rate
+
+    def test_marginal_std_preserved(self):
+        """AR(1) z-scores remain marginally N(0,1), so return std should equal target."""
+        rng = self._rng(0)
+        returns, _, _ = _generate_mc_returns(**self._COMMON, rng=rng, stock_return_ar1_phi=-0.25)
+        assert abs(float(np.std(returns)) - 0.15) < 0.02
+
+    def test_negative_autocorrelation_in_returns(self):
+        """Adjacent-year returns should be negatively correlated with phi < 0."""
+        common = {**self._COMMON, "n_simulations": 20_000}
+        rng = self._rng(0)
+        returns, _, _ = _generate_mc_returns(**common, rng=rng, stock_return_ar1_phi=-0.25)
+        corr = float(np.corrcoef(returns[:, 5], returns[:, 6])[0, 1])
+        assert corr < -0.10, f"Expected negative autocorrelation, got {corr:.3f}"
+
+    def test_zero_phi_same_as_default(self):
+        """Explicit phi=0 must produce identical output to omitting the argument."""
+        s1, _, _ = _generate_mc_returns(self._rng(), **self._COMMON, stock_return_ar1_phi=0.0)
+        s2, _, _ = _generate_mc_returns(self._rng(), **self._COMMON)
+        np.testing.assert_array_equal(s1, s2)
+
+
+class TestParameterUncertainty:
+    _COMMON = dict(
+        n_simulations=2_000, years=15,
+        stock_mean=0.07, stock_std=0.15,
+        inflation_mean=0.02, inflation_std=0.02,
+        bonds_yield=0.03, bond_std=0.01,
+    )
+
+    def _rng(self, seed: int = 42) -> np.random.Generator:
+        return np.random.default_rng(seed)
+
+    def test_success_rate_in_range(self):
+        config = _make_config(mc_stock_mean_uncertainty=0.015, mc_stock_vol_uncertainty=0.03)
+        scenario = _make_scenario(config)
+        result = run_monte_carlo_simulation(
+            config=config, scenario=scenario,
+            n_simulations=500, stock_std=0.15, inflation_std=0.02, seed=42,
+        )
+        assert 0.0 <= result.success_rate <= 1.0
+
+    def test_deterministic_with_same_seed(self):
+        config = _make_config(mc_stock_mean_uncertainty=0.015, mc_stock_vol_uncertainty=0.03)
+        scenario = _make_scenario(config)
+        kwargs = dict(config=config, scenario=scenario, n_simulations=500,
+                      stock_std=0.15, inflation_std=0.02, seed=42)
+        r1 = run_monte_carlo_simulation(**kwargs)
+        r2 = run_monte_carlo_simulation(**kwargs)
+        assert r1.success_rate == r2.success_rate
+
+    def test_uncertainty_widens_outcome_spread(self):
+        """Parameter uncertainty should widen the interquartile range of final portfolios."""
+        kwargs = dict(n_simulations=5_000, stock_std=0.15, inflation_std=0.02, seed=42)
+        config_base = _make_config()
+        scenario = _make_scenario(config_base)
+        r_base = run_monte_carlo_simulation(config=config_base, scenario=scenario, **kwargs)
+
+        config_unc = _make_config(mc_stock_mean_uncertainty=0.02, mc_stock_vol_uncertainty=0.04)
+        r_unc = run_monte_carlo_simulation(config=config_unc, scenario=scenario, **kwargs)
+
+        spread_base = r_base.final_portfolio_percentiles[75] - r_base.final_portfolio_percentiles[25]
+        spread_unc  = r_unc.final_portfolio_percentiles[75]  - r_unc.final_portfolio_percentiles[25]
+        assert spread_unc > spread_base
+
+    def test_zero_uncertainty_same_as_default(self):
+        """Explicit zero uncertainty must produce identical output to the no-uncertainty default."""
+        r1, _, _ = _generate_mc_returns(
+            self._rng(), **self._COMMON, stock_mean_uncertainty=0.0, stock_vol_uncertainty=0.0
+        )
+        r2, _, _ = _generate_mc_returns(self._rng(), **self._COMMON)
+        np.testing.assert_array_equal(r1, r2)
+
+
 class TestAR1Inflation:
     _COMMON = dict(
         n_simulations=2000, years=15,

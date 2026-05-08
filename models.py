@@ -45,6 +45,11 @@ class Config:
     mc_grid_cagr_step: float = 0.01
     mc_grid_n_simulations: int = 15_000
     mc_grid_contribution_max: float = 7_000.0
+    mc_stock_return_df: float = 1000.0         # Student-t df for stocks (large = normal, 5 = fat tails)
+    mc_stock_bond_correlation: float = 0.0    # Cholesky correlation between stock and bond draws
+    mc_stock_return_ar1_phi: float = 0.0      # AR(1) mean reversion (negative = post-crash recovery)
+    mc_stock_mean_uncertainty: float = 0.0    # prior std on stock CAGR (epistemic uncertainty)
+    mc_stock_vol_uncertainty: float = 0.0     # prior std on stock volatility (epistemic uncertainty)
 
     @classmethod
     def from_dict(cls, config: dict[str, object]) -> "Config":
@@ -101,6 +106,11 @@ class Config:
             mc_decumulation_glide_years=int(config.get("mc_decumulation_glide_years", 0)),
             mc_grid_n_simulations=int(config.get("mc_grid_n_simulations", 15_000)),
             mc_grid_contribution_max=float(config.get("mc_grid_contribution_max", 7_000.0)),
+            mc_stock_return_df=float(config.get("mc_stock_return_df", 1000.0)),
+            mc_stock_bond_correlation=float(config.get("mc_stock_bond_correlation", 0.0)),
+            mc_stock_return_ar1_phi=float(config.get("mc_stock_return_ar1_phi", 0.0)),
+            mc_stock_mean_uncertainty=float(config.get("mc_stock_mean_uncertainty", 0.0)),
+            mc_stock_vol_uncertainty=float(config.get("mc_stock_vol_uncertainty", 0.0)),
         )
 
 

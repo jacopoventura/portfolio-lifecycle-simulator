@@ -61,26 +61,72 @@ def _generate_mc_returns(
     bonds_yield: float,
     bond_std: float,
     inflation_ar1_phi: float = 0.0,
+    stock_return_df: float = 1000.0,
+    stock_bond_corr: float = 0.0,
+    stock_return_ar1_phi: float = 0.0,
+    stock_mean_uncertainty: float = 0.0,
+    stock_vol_uncertainty: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    stock_returns = np.maximum(
-        rng.normal(stock_mean, stock_std, (n_simulations, years)), -0.99
-    )
+    shape = (n_simulations, years)
+
+    # AR(1) mean reversion in z-space: z_t = φ·z_{t-1} + √(1−φ²)·ε_t
+    # Marginal distribution of each z_t remains N(0,1), so t-transform is still exact.
+    if abs(stock_return_ar1_phi) > 1e-9:
+        innovation_scale = np.sqrt(max(1.0 - stock_return_ar1_phi ** 2, 0.0))
+        z_innovations = rng.standard_normal(shape)
+        z_stock = np.empty(shape)
+        z_prev = np.zeros(n_simulations)
+        for t in range(years):
+            z_stock[:, t] = stock_return_ar1_phi * z_prev + innovation_scale * z_innovations[:, t]
+            z_prev = z_stock[:, t]
+    else:
+        z_stock = rng.standard_normal(shape)
+
+    # Cholesky stock/bond correlation
+    z_bond_raw = rng.standard_normal(shape)
+    if abs(stock_bond_corr) > 1e-9:
+        z_bond = stock_bond_corr * z_stock + np.sqrt(1.0 - stock_bond_corr ** 2) * z_bond_raw
+    else:
+        z_bond = z_bond_raw
+
+    # Parameter uncertainty: each simulation draws its own μ and σ from a prior.
+    # Models epistemic uncertainty — we don't know the true long-run CAGR or volatility.
+    if stock_mean_uncertainty > 1e-9:
+        eff_mean = rng.normal(stock_mean, stock_mean_uncertainty, (n_simulations, 1))
+    else:
+        eff_mean = stock_mean
+    if stock_vol_uncertainty > 1e-9:
+        eff_std = np.maximum(rng.normal(stock_std, stock_vol_uncertainty, (n_simulations, 1)), 0.01)
+    else:
+        eff_std = stock_std
+
+    # Student-t fat tails for stocks when df < 100 (preserves target std)
+    if stock_return_df < 100.0:
+        df = stock_return_df
+        chi2 = rng.chisquare(df, shape) / df
+        t_draw = z_stock / np.sqrt(chi2)
+        stock_returns = eff_mean + t_draw * eff_std * np.sqrt((df - 2.0) / df)
+    else:
+        stock_returns = eff_mean + z_stock * eff_std
+    stock_returns = np.maximum(stock_returns, -0.99)
+
+    # Inflation — independent of stock/bond correlation
     if inflation_ar1_phi == 0.0:
-        inflations = rng.normal(inflation_mean, inflation_std, (n_simulations, years))
+        inflations = rng.normal(inflation_mean, inflation_std, shape)
     else:
         # AR(1): inflation_t = μ + φ·(inflation_{t-1} − μ) + ε_t
         # innovation_std keeps marginal variance = inflation_std²
         innovation_std = inflation_std * np.sqrt(1 - inflation_ar1_phi ** 2)
-        inflations = np.empty((n_simulations, years))
+        inflations = np.empty(shape)
         prev = np.full(n_simulations, inflation_mean)
         for t in range(years):
             eps = rng.normal(0.0, innovation_std, n_simulations)
             inflations[:, t] = inflation_mean + inflation_ar1_phi * (prev - inflation_mean) + eps
             prev = inflations[:, t]
     inflations = np.where(inflations < 0, inflations / 2, inflations)
-    bond_yields = np.maximum(
-        rng.normal(bonds_yield, bond_std, (n_simulations, years)), -0.5
-    )
+
+    # Bond yields from correlated z-scores
+    bond_yields = np.maximum(bonds_yield + z_bond * bond_std, -0.5)
     return stock_returns, inflations, bond_yields
 
 
@@ -132,6 +178,11 @@ def _setup_mc(
         config.expected_inflation_percent / 100, inflation_std,
         bonds_yield, bond_std,
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
+        stock_return_df=config.mc_stock_return_df,
+        stock_bond_corr=config.mc_stock_bond_correlation,
+        stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
+        stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
+        stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
     )
     stock_values = np.full(n_simulations, float(initial_stock))
     bond_values = np.full(n_simulations, float(initial_bonds))
@@ -1077,6 +1128,11 @@ def simulate_decumulation(
         config.expected_inflation_percent / 100, is_,
         config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
+        stock_return_df=config.mc_stock_return_df,
+        stock_bond_corr=config.mc_stock_bond_correlation,
+        stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
+        stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
+        stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
     )
     initial_stock_v = np.full(n, initial_portfolio * sa)
     initial_bond_v  = np.full(n, initial_portfolio * (1.0 - sa))
@@ -1160,6 +1216,11 @@ def compute_sorr_scenarios(
         config.expected_inflation_percent / 100, is_,
         config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
+        stock_return_df=config.mc_stock_return_df,
+        stock_bond_corr=config.mc_stock_bond_correlation,
+        stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
+        stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
+        stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
     )
     initial_stock_v = np.full(n, initial_portfolio * sa)
     initial_bond_v  = np.full(n, initial_portfolio * (1.0 - sa))
@@ -1278,6 +1339,11 @@ def compute_allocation_sweep(
         config.yield_bonds / 100,
         config.mc_bond_yield_std_percent / 100,
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
+        stock_return_df=config.mc_stock_return_df,
+        stock_bond_corr=config.mc_stock_bond_correlation,
+        stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
+        stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
+        stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
     )
 
     wd_rate = config.withdrawal_percentage_stock / 100.0

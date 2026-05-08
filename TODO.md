@@ -63,17 +63,25 @@ and mc_stock_return_std_percent from historical rolling mean CAGR and ann_vol_eu
 Makes the core assumption evidence-based instead of a manual guess.
 Must come before decumulation so inputs are credible.
 
-## P7 · Student-t return distribution (fat tails)
-Replace rng.normal for stock returns with Student-t (df configurable, e.g. df=5).
-Real crashes (2000, 2008, 2020) are more frequent and deeper than normal predicts.
-Current success rates are slightly optimistic. ~2h to implement + update tests.
-Config field: mc_stock_return_df (default inf = normal, set 5 for fat tails).
+## ✓ P7 · Student-t return distribution (fat tails)  [DONE]
+Config field: mc_stock_return_df (default 1000 = normal, 5 = fat tails).
+Cholesky + chi² transform preserves target std; crashes are more frequent and deeper.
+Active in config.toml: mc_stock_return_df = 5.0
 
-## P8 · Stock/bond return correlation
-Currently stocks and bonds are drawn independently. In 2022 both fell simultaneously.
-Add mc_stock_bond_correlation config field (default 0.0). Cholesky decomposition on
-the joint return draws. Raises true tail risk for Q1 hard target (both must succeed).
-~2h to implement.
+## ✓ P8 · Stock/bond return correlation  [DONE]
+Config field: mc_stock_bond_correlation (default 0.0). Cholesky on joint z-scores.
+Active in config.toml: mc_stock_bond_correlation = -0.2 (typical flight-to-quality hedge).
+
+## ✓ P8b · Stock return mean reversion (AR(1))  [DONE]
+Config field: mc_stock_return_ar1_phi (default 0.0, active -0.25).
+AR(1) in z-space: marginal distribution remains exactly t(df); post-crash recovery is modelled.
+Active in config.toml: mc_stock_return_ar1_phi = -0.25
+
+## ✓ P8c · Parameter uncertainty  [DONE]
+Config fields: mc_stock_mean_uncertainty (default 0.0, active 0.015 = ±1.5pp on CAGR),
+mc_stock_vol_uncertainty (default 0.0, active 0.03 = ±3pp on vol).
+Each simulation path draws its own μ and σ from a prior — models epistemic uncertainty
+about the true long-run CAGR and volatility. Widens outcome distribution honestly.
 
 ## P9 · Historical stress scenarios (accumulation)
 Run accumulation with real return sequences: 2000–2002 crash, 2008–2009, 2022 drawdown.
