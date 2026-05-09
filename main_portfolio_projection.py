@@ -18,6 +18,7 @@ from monte_carlo import (
     compute_bond_stock_grid,
     compute_combined_grid,
     compute_contribution_cagr_grid,
+    compute_inflation_cagr_grid,
     compute_optimal_allocation,
     compute_required_cagr_for_success,
     compute_sensitivity_waterfall,
@@ -31,6 +32,7 @@ from reports import (
     clear_terminal,
     print_combined_q1_analysis,
     print_current_situation_mc,
+    print_inflation_cagr_heatmap,
     print_financial_freedom_report,
     print_monte_carlo_report,
     print_optimal_allocation_report,
@@ -73,6 +75,7 @@ def _print_verbose_report(
     ff_de, ff_it,
     opt_result_1, opt_result_2,
     stock_sweep,
+    heatmap_de, heatmap_it,
 ) -> None:
     # ── Section 1: Assumptions & Target ───────────────────────────────────────
     _print_section(1, "ASSUMPTIONS & TARGET  —  DETERMINISTIC")
@@ -157,6 +160,9 @@ def _print_verbose_report(
     if stock_sweep:
         print_stock_allocation_sweep(stock_sweep=stock_sweep, config=config)
 
+    _print_subsection("Q2d — Joint sensitivity: income success vs Inflation × CAGR")
+    print_inflation_cagr_heatmap(heatmap_de, heatmap_it, target_success=target_success)
+
     # ── Section 3: Current Situation & Recommendation ─────────────────────────
     _print_section(3, "CURRENT SITUATION & RECOMMENDATION")
     print_projection_report(
@@ -196,9 +202,12 @@ def main() -> None:
                         help="also print full grids, sensitivity tables and MC scans")
     parser.add_argument("--action-plan", action="store_true",
                         help="call Claude Haiku to generate 5 prioritised action bullets (requires ANTHROPIC_API_KEY)")
-    args = parser.parse_args()
+    parser.add_argument("--no-clear", action="store_true",
+                        help="suppress terminal clear (used when called from main.py)")
+    args, _ = parser.parse_known_args()
 
-    clear_terminal()
+    if not args.no_clear:
+        clear_terminal()
     config_path = Path(__file__).with_name("config.toml")
 
     try:
@@ -434,6 +443,17 @@ def main() -> None:
         step=config.optimize_grid_step, target_success=target_success,
     )
 
+    heatmap_de = compute_inflation_cagr_grid(
+        config=config, scenario=scenario_1_result,
+        stock_std=stock_std, inflation_std=inflation_std,
+        monthly_stocks=current_stock_mo, monthly_bonds=current_bonds_mo,
+    )
+    heatmap_it = compute_inflation_cagr_grid(
+        config=config, scenario=scenario_2_result,
+        stock_std=stock_std, inflation_std=inflation_std,
+        monthly_stocks=current_stock_mo, monthly_bonds=current_bonds_mo,
+    )
+
     stock_sweep = None
     if args.verbose:
         stock_sweep = compute_stock_allocation_sweep(
@@ -476,6 +496,7 @@ def main() -> None:
             ff_de=ff_de, ff_it=ff_it,
             opt_result_1=opt_result_1, opt_result_2=opt_result_2,
             stock_sweep=stock_sweep,
+            heatmap_de=heatmap_de, heatmap_it=heatmap_it,
         )
     verbose_report = verbose_buf.getvalue()
 
@@ -494,6 +515,11 @@ def main() -> None:
         print("=" * 70)
         print()
         print_sensitivity_waterfall(sensitivity_de, sensitivity_it)
+        print("\n")
+        print("=" * 70)
+        print("  JOINT SENSITIVITY — income success vs Inflation × Stock CAGR")
+        print("=" * 70)
+        print_inflation_cagr_heatmap(heatmap_de, heatmap_it, target_success=target_success)
         print_summary_q3(ff_de, ff_it, config)
         print_summary_q2a(combined_de, combined_it, config, target_success,
                           cagr_stock_s1, cagr_stock_s2)
@@ -521,6 +547,18 @@ def main() -> None:
             print("\n  Install the 'anthropic' package to use --action-plan.")
         except Exception as error:
             print(f"\n  Action plan failed: {error}")
+
+    # Bridge values for unified main.py
+    tail_pct_int = int(round(100 - config.mc_target_success_percent))
+    return (
+        mc2.final_portfolio_percentiles.get(50, 0.0),
+        mc2.final_portfolio_percentiles.get(tail_pct_int, 0.0),
+        cagr_stock_s2,
+        tail_pct_int,
+        verbose_report,
+        clean_summary,
+        config_toml_text,
+    )
 
 
 if __name__ == "__main__":

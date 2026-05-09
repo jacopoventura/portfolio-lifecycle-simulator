@@ -34,10 +34,10 @@ class Config:
     mc_inflation_ar1_phi: float = 0.0
     mc_decumulation_years: int = 40
     mc_decumulation_stock_pct: float = 0.40  # derived from bonds_percentage; kept for override
-    mc_decumulation_stock_return: float = 0.05
     mc_decumulation_n_simulations: int = 10_000
     mc_decumulation_pension_start_year: int = 15
     mc_decumulation_pension_monthly: float = 2_500.0
+    mc_decumulation_pension_adjustment_rate: float = 0.0  # nominal annual pension growth (0 = fixed nominal)
     mc_decumulation_glide_end_pct: float = 0.0   # stock% at end of glide (0 = no glide)
     mc_decumulation_glide_years: int = 0          # years to complete glide (0 = no glide)
     mc_grid_cagr_min: float = 0.03
@@ -95,10 +95,10 @@ class Config:
                 "mc_decumulation_stock_pct",
                 1.0 - float(config["bonds_percentage"]) / 100.0,
             )),
-            mc_decumulation_stock_return=float(config.get("mc_decumulation_stock_return", 0.05)),
             mc_decumulation_n_simulations=int(config.get("mc_decumulation_n_simulations", 10_000)),
             mc_decumulation_pension_start_year=int(config.get("mc_decumulation_pension_start_year", 15)),
             mc_decumulation_pension_monthly=float(config.get("mc_decumulation_pension_monthly", 2_500.0)),
+            mc_decumulation_pension_adjustment_rate=float(config.get("mc_decumulation_pension_adjustment_rate", 0.0)),
             mc_decumulation_glide_end_pct=float(config.get(
                 "mc_decumulation_glide_end_pct",
                 1.0 - float(config["bonds_percentage"]) / 100.0,  # default = start = no glide
@@ -362,3 +362,20 @@ class AllocationSweepResult:
     glide_end_pct: float        # stock% at end of glide
     glide_years: int            # years to complete glide
     base_bonds_pct: float       # bonds_pct from config (current plan)
+
+
+@dataclass
+class InflationCagrCell:
+    success_income: float   # P(portfolio income >= inflation-adjusted target)
+
+
+@dataclass
+class InflationCagrGrid:
+    scenario_name: str
+    cagr_values: list[float]       # x-axis (decimal, e.g. 0.05)
+    inflation_values: list[float]  # y-axis (decimal, e.g. 0.02)
+    base_cagr: float               # config expected_yearly_growth_stocks_percent / 100
+    base_inflation: float          # config expected_inflation_percent / 100
+    monthly_stocks: float
+    monthly_bonds: float
+    grid: list[list[InflationCagrCell]]  # [inflation_idx][cagr_idx]

@@ -19,6 +19,8 @@ from models import (
     ContributionCagrGrid,
     DecumulationResult,
     FinancialFreedomResult,
+    InflationCagrCell,
+    InflationCagrGrid,
     JointProbabilityResult,
     MonteCarloResult,
     OptimalAllocationResult,
@@ -964,6 +966,85 @@ def compute_stock_allocation_sweep(
     return results
 
 
+# ── Inflation × CAGR sensitivity heatmap ─────────────────────────────────────
+
+_INFLATION_CAGR_N_SIMULATIONS = 5_000
+_INFLATION_VALUES = [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040]
+
+
+def _mc_inflation_cagr_worker(args: tuple):
+    config, scenario, n_sims, stock_std, inflation_std, seed, smo, bmo, cagr, inflation_pct = args
+    cfg = _dc_replace(config, expected_inflation_percent=inflation_pct * 100.0)
+    return run_monte_carlo_simulation(
+        config=cfg, scenario=scenario,
+        n_simulations=n_sims, stock_std=stock_std, inflation_std=inflation_std,
+        seed=seed,
+        monthly_stock_contribution_override=smo,
+        monthly_bonds_contribution_override=bmo,
+        stock_mean_override=cagr,
+    )
+
+
+def compute_inflation_cagr_grid(
+    config: Config,
+    scenario: ScenarioResult,
+    stock_std: float,
+    inflation_std: float,
+    monthly_stocks: float,
+    monthly_bonds: float,
+    seed: int = 42,
+    n_simulations: int = _INFLATION_CAGR_N_SIMULATIONS,
+    n_workers: int | None = None,
+) -> InflationCagrGrid:
+    """2D sensitivity grid: income success rate vs (inflation, CAGR).
+
+    Both axes vary around the base-case config values, using current
+    monthly contributions. Metric: P(portfolio income >= inflation-adjusted target).
+    """
+    cagr_values: list[float] = []
+    c = config.mc_grid_cagr_min
+    while c <= config.mc_grid_cagr_max + 1e-9:
+        cagr_values.append(round(c, 4))
+        c = round(c + config.mc_grid_cagr_step, 4)
+
+    master_rng = np.random.default_rng(seed)
+    args_list = []
+    for inf in _INFLATION_VALUES:
+        for cagr in cagr_values:
+            cell_seed = int(master_rng.integers(0, 2**31))
+            args_list.append((
+                config, scenario, n_simulations, stock_std, inflation_std,
+                cell_seed, monthly_stocks, monthly_bonds, cagr, inf,
+            ))
+
+    n_w = _resolve_workers(n_workers, len(args_list), n_simulations)
+    if n_w > 1:
+        with ProcessPoolExecutor(max_workers=n_w) as pool:
+            results = list(pool.map(_mc_inflation_cagr_worker, args_list))
+    else:
+        results = [_mc_inflation_cagr_worker(a) for a in args_list]
+
+    grid: list[list[InflationCagrCell]] = []
+    idx = 0
+    for _ in _INFLATION_VALUES:
+        row: list[InflationCagrCell] = []
+        for _ in cagr_values:
+            row.append(InflationCagrCell(success_income=results[idx].success_rate_income_only))
+            idx += 1
+        grid.append(row)
+
+    return InflationCagrGrid(
+        scenario_name=scenario.name,
+        cagr_values=cagr_values,
+        inflation_values=_INFLATION_VALUES,
+        base_cagr=config.expected_yearly_growth_stocks_percent / 100.0,
+        base_inflation=config.expected_inflation_percent / 100.0,
+        monthly_stocks=monthly_stocks,
+        monthly_bonds=monthly_bonds,
+        grid=grid,
+    )
+
+
 # ── Decumulation MC ───────────────────────────────────────────────────────────
 
 _SORR_SEQUENCES: list[tuple[str, list[float]]] = [
@@ -985,6 +1066,7 @@ def _run_decum_loop(
     bond_tax_rate: float,
     pension_monthly: float,
     pension_start_year: int,
+    pension_adjustment_rate: float = 0.0,
     stock_pct_end: float = -1.0,
     glide_years: int = 0,
 ) -> DecumulationResult:
@@ -1037,7 +1119,10 @@ def _run_decum_loop(
 
         # 4. Inflation-adjusted target and pension income
         target_annual = initial_annual_wd * cum_inf
-        pension_income = pension_annual if year >= pension_start_year else 0.0
+        if year >= pension_start_year:
+            pension_income = pension_annual * (1.0 + pension_adjustment_rate) ** (year - pension_start_year)
+        else:
+            pension_income = 0.0
 
         # 5. Guyton-Klinger adjustment on total target
         if withdrawal_strategy == "guyton_klinger":
@@ -1124,7 +1209,7 @@ def simulate_decumulation(
     rng = np.random.default_rng(seed)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
-        config.mc_decumulation_stock_return, ss,
+        config.expected_yearly_growth_stocks_percent / 100, ss,
         config.expected_inflation_percent / 100, is_,
         config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
@@ -1150,6 +1235,7 @@ def simulate_decumulation(
         bond_tax_rate=btr,
         pension_monthly=config.mc_decumulation_pension_monthly,
         pension_start_year=config.mc_decumulation_pension_start_year,
+        pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
         stock_pct_end=gep,
         glide_years=gyr,
     )
@@ -1212,7 +1298,7 @@ def compute_sorr_scenarios(
     rng = np.random.default_rng(seed)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
-        config.mc_decumulation_stock_return, ss,
+        config.expected_yearly_growth_stocks_percent / 100, ss,
         config.expected_inflation_percent / 100, is_,
         config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
@@ -1237,6 +1323,7 @@ def compute_sorr_scenarios(
         bond_tax_rate=config.tax_rate_bond_italy,
         pension_monthly=config.mc_decumulation_pension_monthly,
         pension_start_year=config.mc_decumulation_pension_start_year,
+        pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
         stock_pct_end=config.mc_decumulation_glide_end_pct,
         glide_years=config.mc_decumulation_glide_years,
     )
@@ -1332,7 +1419,7 @@ def compute_allocation_sweep(
     rng = np.random.default_rng(seed)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
-        config.mc_decumulation_stock_return,
+        config.expected_yearly_growth_stocks_percent / 100,
         config.mc_stock_return_std_percent / 100,
         config.expected_inflation_percent / 100,
         config.mc_inflation_std_percent / 100,
@@ -1378,6 +1465,7 @@ def compute_allocation_sweep(
             bond_tax_rate=btr,
             pension_monthly=config.mc_decumulation_pension_monthly,
             pension_start_year=config.mc_decumulation_pension_start_year,
+            pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
             stock_pct_end=eff_glide_end,
             glide_years=eff_glide_yrs,
         )

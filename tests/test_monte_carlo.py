@@ -3,7 +3,7 @@ import pytest
 
 from finance import run_scenario
 from models import Config
-from monte_carlo import _generate_mc_returns, run_monte_carlo_simulation
+from monte_carlo import _generate_mc_returns, compute_inflation_cagr_grid, run_monte_carlo_simulation
 
 
 def _make_config(**overrides) -> Config:
@@ -430,3 +430,112 @@ class TestAR1Inflation:
             f"AR(1) phi=0.6 should widen cumulative inflation spread: "
             f"phi=0={spread0:.4f}, phi=0.6={spread6:.4f}"
         )
+
+
+class TestInflationCagrGrid:
+    def _make_config(self, **kw):
+        from tests.test_monte_carlo import _make_config as mc
+        return mc(**kw)
+
+    def _scenario(self, config):
+        from finance import run_scenario
+        return run_scenario(
+            name="TEST", config=config,
+            future_monthly_income_value=4_000.0,
+            target_annual_net_income=48_000.0,
+            stock_tax_rate=config.tax_rate,
+            bond_tax_rate=config.tax_rate,
+            stock_expected_yield=config.expected_yearly_growth_stocks_percent / 100,
+            bonds_yield=config.yield_bonds / 100,
+            withdrawal_rate=config.withdrawal_percentage_stock / 100,
+            stock_gain_fraction=0.3,
+            stock_teilfreistellung=config.teilfreistellung,
+            annual_contribution_growth=config.annual_contribution_growth_percent / 100,
+        )
+
+    def test_grid_dimensions(self):
+        from monte_carlo import _INFLATION_VALUES
+        config = _make_config()
+        scenario = _make_scenario(config)
+        grid = compute_inflation_cagr_grid(
+            config=config, scenario=scenario,
+            stock_std=0.15, inflation_std=0.02,
+            monthly_stocks=2_000.0, monthly_bonds=500.0,
+            n_simulations=200, seed=42,
+        )
+        assert len(grid.inflation_values) == len(_INFLATION_VALUES)
+        assert len(grid.grid) == len(_INFLATION_VALUES)
+        assert all(len(row) == len(grid.cagr_values) for row in grid.grid)
+
+    def test_success_rates_in_range(self):
+        config = _make_config()
+        scenario = _make_scenario(config)
+        grid = compute_inflation_cagr_grid(
+            config=config, scenario=scenario,
+            stock_std=0.15, inflation_std=0.02,
+            monthly_stocks=2_000.0, monthly_bonds=500.0,
+            n_simulations=200, seed=42,
+        )
+        for row in grid.grid:
+            for cell in row:
+                assert 0.0 <= cell.success_income <= 1.0
+
+    def test_higher_cagr_higher_success(self):
+        """At fixed inflation, higher CAGR should give higher or equal success."""
+        config = _make_config()
+        scenario = _make_scenario(config)
+        grid = compute_inflation_cagr_grid(
+            config=config, scenario=scenario,
+            stock_std=0.15, inflation_std=0.02,
+            monthly_stocks=2_000.0, monthly_bonds=500.0,
+            n_simulations=500, seed=42,
+        )
+        # Check middle inflation row: success should be non-decreasing with CAGR
+        mid_row = grid.grid[len(grid.grid) // 2]
+        rates = [cell.success_income for cell in mid_row]
+        assert rates[-1] >= rates[0], f"Expected higher CAGR → higher success: {rates}"
+
+    def test_higher_inflation_lower_success(self):
+        """At fixed CAGR, higher inflation should give lower or equal success."""
+        config = _make_config()
+        scenario = _make_scenario(config)
+        grid = compute_inflation_cagr_grid(
+            config=config, scenario=scenario,
+            stock_std=0.15, inflation_std=0.02,
+            monthly_stocks=2_000.0, monthly_bonds=500.0,
+            n_simulations=500, seed=42,
+        )
+        # Check last CAGR column: success should be non-increasing with inflation
+        col_idx = len(grid.cagr_values) - 1
+        rates = [grid.grid[i][col_idx].success_income for i in range(len(grid.inflation_values))]
+        assert rates[0] >= rates[-1], f"Expected higher inflation → lower success: {rates}"
+
+    def test_base_values_recorded(self):
+        config = _make_config(
+            expected_yearly_growth_stocks_percent=5.0,
+            expected_inflation_percent=2.0,
+        )
+        scenario = _make_scenario(config)
+        grid = compute_inflation_cagr_grid(
+            config=config, scenario=scenario,
+            stock_std=0.15, inflation_std=0.02,
+            monthly_stocks=2_000.0, monthly_bonds=500.0,
+            n_simulations=200, seed=42,
+        )
+        assert grid.base_cagr == pytest.approx(0.05)
+        assert grid.base_inflation == pytest.approx(0.02)
+
+    def test_deterministic_with_same_seed(self):
+        config = _make_config()
+        scenario = _make_scenario(config)
+        kwargs = dict(
+            config=config, scenario=scenario,
+            stock_std=0.15, inflation_std=0.02,
+            monthly_stocks=2_000.0, monthly_bonds=500.0,
+            n_simulations=200, seed=7,
+        )
+        g1 = compute_inflation_cagr_grid(**kwargs)
+        g2 = compute_inflation_cagr_grid(**kwargs)
+        for i, row in enumerate(g1.grid):
+            for j, cell in enumerate(row):
+                assert cell.success_income == g2.grid[i][j].success_income

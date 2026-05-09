@@ -3,6 +3,7 @@ from models import (
     CombinedGrid,
     Config,
     ContributionCagrGrid,
+    InflationCagrGrid,
     MonteCarloResult,
     ScenarioResult,
 )
@@ -657,3 +658,46 @@ def print_combined_q1_analysis(
         print(f"  {int(cagr * 100):2d}%     {_fmt_row(opt_de)}  {_fmt_row(opt_it)}")
 
     print(sep)
+
+
+def print_inflation_cagr_heatmap(
+    grid_1: InflationCagrGrid,
+    grid_2: InflationCagrGrid,
+    target_success: float,
+) -> None:
+    """Print a 2D heatmap of income success rate vs (inflation, CAGR) for two scenarios."""
+    def _cell(rate: float, is_base: bool) -> str:
+        s = f"{rate * 100:.0f}%"
+        return f"[{s}]" if is_base else f" {s} "
+
+    def _print_grid(grid: InflationCagrGrid) -> None:
+        col_w = 7
+        header = f"  {'CPI↓  CAGR→':>12}"
+        for cagr in grid.cagr_values:
+            marker = "*" if abs(cagr - grid.base_cagr) < 1e-4 else " "
+            header += f"  {int(round(cagr * 100)):>2}%{marker}"
+        print(header)
+        sep = "  " + "-" * (13 + len(grid.cagr_values) * (col_w - 1))
+        print(sep)
+
+        for i, inf in enumerate(grid.inflation_values):
+            is_base_inf = abs(inf - grid.base_inflation) < 1e-4
+            inf_label = f"{inf * 100:.1f}%{'←' if is_base_inf else ' '}"
+            row = f"  {inf_label:>12}"
+            for j, cagr in enumerate(grid.cagr_values):
+                rate = grid.grid[i][j].success_income
+                is_base = is_base_inf and abs(cagr - grid.base_cagr) < 1e-4
+                row += f"  {_cell(rate, is_base):>5}"
+            print(row)
+
+        print(sep)
+        print(f"  * = base CAGR ({grid.base_cagr * 100:.1f}%)   "
+              f"← = base CPI ({grid.base_inflation * 100:.1f}%)   "
+              f"[XX%] = base case   target ≥ {target_success * 100:.0f}%")
+        print(f"  Contributions: stocks €{grid.monthly_stocks:,.0f}/mo  "
+              f"bonds €{grid.monthly_bonds:,.0f}/mo")
+
+    print(f"\n  {grid_1.scenario_name}")
+    _print_grid(grid_1)
+    print(f"\n  {grid_2.scenario_name}")
+    _print_grid(grid_2)

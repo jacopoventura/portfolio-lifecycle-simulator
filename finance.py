@@ -47,6 +47,34 @@ def validate_config_inputs(
         raise ValueError("mc_stock_return_std_percent must be greater than or equal to 0.")
     if config.mc_inflation_std_percent < 0:
         raise ValueError("mc_inflation_std_percent must be greater than or equal to 0.")
+    if config.mc_bond_yield_std_percent < 0:
+        raise ValueError("mc_bond_yield_std_percent must be >= 0.")
+    if not (-1.0 < config.mc_inflation_ar1_phi < 1.0):
+        raise ValueError("mc_inflation_ar1_phi must be strictly between -1 and 1 (stationarity requires |φ| < 1).")
+    if not (-1.0 < config.mc_stock_bond_correlation < 1.0):
+        raise ValueError("mc_stock_bond_correlation must be strictly between -1 and 1.")
+    if config.mc_stock_return_df <= 2.0:
+        raise ValueError("mc_stock_return_df must be > 2 (t-distribution variance is infinite for df ≤ 2).")
+    if not (-1.0 < config.mc_stock_return_ar1_phi < 1.0):
+        raise ValueError("mc_stock_return_ar1_phi must be strictly between -1 and 1 (stationarity requires |φ| < 1).")
+    if config.mc_stock_mean_uncertainty < 0:
+        raise ValueError("mc_stock_mean_uncertainty must be >= 0.")
+    if config.mc_stock_vol_uncertainty < 0:
+        raise ValueError("mc_stock_vol_uncertainty must be >= 0.")
+    if config.mc_decumulation_years <= 0:
+        raise ValueError("mc_decumulation_years must be > 0.")
+    if config.mc_decumulation_n_simulations <= 0:
+        raise ValueError("mc_decumulation_n_simulations must be > 0.")
+    if not (0.0 <= config.mc_decumulation_stock_pct <= 1.0):
+        raise ValueError("mc_decumulation_stock_pct must be between 0 and 1.")
+    if not (0.0 <= config.mc_decumulation_glide_end_pct <= 1.0):
+        raise ValueError("mc_decumulation_glide_end_pct must be between 0 and 1.")
+    if config.mc_decumulation_glide_years < 0:
+        raise ValueError("mc_decumulation_glide_years must be >= 0.")
+    if config.mc_decumulation_pension_monthly < 0:
+        raise ValueError("mc_decumulation_pension_monthly must be >= 0.")
+    if config.mc_decumulation_pension_start_year < 0:
+        raise ValueError("mc_decumulation_pension_start_year must be >= 0.")
 
 
 def validate_projection_inputs(config: Config, cash_interest_rate: float) -> None:

@@ -43,10 +43,10 @@ def _make_config(**overrides) -> Config:
         mc_target_success_percent=95,
         mc_decumulation_years=20,
         mc_decumulation_stock_pct=0.40,
-        mc_decumulation_stock_return=0.05,
         mc_decumulation_n_simulations=300,
         mc_decumulation_pension_start_year=15,
         mc_decumulation_pension_monthly=2_500.0,
+        mc_decumulation_pension_adjustment_rate=0.0,
     )
     defaults.update(overrides)
     return Config(**defaults)
@@ -229,3 +229,29 @@ class TestJointProbability:
         )
         assert joint.joint_p50 == pytest.approx(0.50 * joint.p_survive_from_p50)
         assert joint.joint_tail == pytest.approx(0.03 * joint.p_survive_from_tail)
+
+
+class TestPensionAdjustmentRate:
+    def test_growing_pension_improves_or_matches_survival(self):
+        # Growing pension reduces portfolio draw in later years → survival should not decrease
+        config_fixed = _make_config(mc_decumulation_pension_adjustment_rate=0.0)
+        config_growing = _make_config(mc_decumulation_pension_adjustment_rate=0.015)
+        r_fixed = simulate_decumulation(config_fixed, _PORTFOLIO, seed=42, n_simulations=_SMALL_N)
+        r_growing = simulate_decumulation(config_growing, _PORTFOLIO, seed=42, n_simulations=_SMALL_N)
+        assert r_growing.survival_rate >= r_fixed.survival_rate - 0.02
+
+    def test_zero_rate_is_fixed_nominal(self):
+        # rate=0 → pension never changes → same result from both configs
+        r1 = simulate_decumulation(_make_config(mc_decumulation_pension_adjustment_rate=0.0),
+                                   _PORTFOLIO, seed=7, n_simulations=_SMALL_N)
+        r2 = simulate_decumulation(_make_config(mc_decumulation_pension_adjustment_rate=0.0),
+                                   _PORTFOLIO, seed=7, n_simulations=_SMALL_N)
+        assert r1.survival_rate == pytest.approx(r2.survival_rate)
+
+    def test_higher_rate_improves_survival(self):
+        # 3% growth > 1.5%: more pension income in later years → better survival
+        r_low = simulate_decumulation(_make_config(mc_decumulation_pension_adjustment_rate=0.015),
+                                      _PORTFOLIO, seed=42, n_simulations=_SMALL_N)
+        r_high = simulate_decumulation(_make_config(mc_decumulation_pension_adjustment_rate=0.03),
+                                       _PORTFOLIO, seed=42, n_simulations=_SMALL_N)
+        assert r_high.survival_rate >= r_low.survival_rate - 0.02

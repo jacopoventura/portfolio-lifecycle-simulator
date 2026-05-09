@@ -43,7 +43,17 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> None:
+def main(
+    portfolio_override: float | None = None,
+    p50_override: float | None = None,
+    tail_override: float | None = None,
+) -> str | None:
+    """Run decumulation analysis.
+
+    When called programmatically from main.py, pass portfolio_override / p50_override /
+    tail_override to wire accumulation bridge values directly instead of CLI flags.
+    Returns the full report text (captured from stdout) for the AI agent.
+    """
     args = _parse_args()
     config = _load_config(args.config)
 
@@ -57,11 +67,13 @@ def main() -> None:
     print(f"\nDecumulation Monte Carlo  |  {n:,} simulations  |  "
           f"horizon {config.mc_decumulation_years} yr  |  "
           f"target survival {target_pct}%")
+    adj = config.mc_decumulation_pension_adjustment_rate
+    pension_note = f"  +{adj * 100:.1f}%/yr" if adj > 0 else "  (fixed nominal)"
     print(f"Withdrawal rate: {config.withdrawal_percentage_stock:.2f}% pa  |  "
           f"Stock allocation: {config.mc_decumulation_stock_pct * 100:.0f}%  |  "
-          f"Stock return μ: {config.mc_decumulation_stock_return * 100:.1f}%  |  "
+          f"Stock return μ: {config.expected_yearly_growth_stocks_percent:.1f}%  |  "
           f"Pension: €{config.mc_decumulation_pension_monthly:,.0f}/mo "
-          f"from year {config.mc_decumulation_pension_start_year}")
+          f"from year {config.mc_decumulation_pension_start_year}{pension_note}")
     print()
 
     _SEARCH_HI = 10_000_000.0
@@ -114,8 +126,9 @@ def main() -> None:
     )
 
     # ── Joint probability ─────────────────────────────────────────────────────
-    p50 = args.p50 if args.p50 is not None else display_portfolio
-    tail = args.tail if args.tail is not None else required_gk
+    # Bridge: programmatic overrides from main.py take precedence over CLI args
+    p50 = p50_override if p50_override is not None else (args.p50 if args.p50 is not None else display_portfolio)
+    tail = tail_override if tail_override is not None else (args.tail if args.tail is not None else required_gk)
     tail_pct = args.tail_pct
 
     print("Computing joint probability…", flush=True)
@@ -133,9 +146,7 @@ def main() -> None:
     sweep = compute_allocation_sweep(config, seed=seed, n_simulations=min(n, 5_000))
 
     # ── Deterministic reference (accumulation plan target) ───────────────────
-    # Pass via --portfolio. Without it we fall back to required_gk as a
-    # reasonable reference. Connect to main_portfolio_projection in a later step.
-    deterministic_target = args.portfolio if args.portfolio else display_portfolio
+    deterministic_target = portfolio_override or (args.portfolio if args.portfolio else display_portfolio)
 
     # ── Report ────────────────────────────────────────────────────────────────
     print_decumulation_report(

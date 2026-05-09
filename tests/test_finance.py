@@ -246,3 +246,97 @@ class TestRunProjection:
         result = run_projection(config, stock_expected_yield=0.07)
         assert result.total_vorabpauschale >= 0.0
         assert result.total_vorabpauschale_tax >= 0.0
+
+
+class TestValidateConfigInputsMCAdvanced:
+    """Validation of advanced MC parameters added for P7/P8/P8b/P8c."""
+
+    def _call(self, config):
+        validate_config_inputs(config, 0.07, 0.03, 0.033)
+
+    def test_correlation_plus_one_raises(self):
+        with pytest.raises(ValueError, match="mc_stock_bond_correlation"):
+            self._call(_make_config(mc_stock_bond_correlation=1.0))
+
+    def test_correlation_minus_one_raises(self):
+        with pytest.raises(ValueError, match="mc_stock_bond_correlation"):
+            self._call(_make_config(mc_stock_bond_correlation=-1.0))
+
+    def test_correlation_out_of_range_raises(self):
+        with pytest.raises(ValueError, match="mc_stock_bond_correlation"):
+            self._call(_make_config(mc_stock_bond_correlation=1.5))
+
+    def test_correlation_valid_does_not_raise(self):
+        self._call(_make_config(mc_stock_bond_correlation=-0.2))
+
+    def test_stock_return_df_le_2_raises(self):
+        with pytest.raises(ValueError, match="mc_stock_return_df"):
+            self._call(_make_config(mc_stock_return_df=2.0))
+
+    def test_stock_return_df_exactly_2_raises(self):
+        with pytest.raises(ValueError, match="mc_stock_return_df"):
+            self._call(_make_config(mc_stock_return_df=2.0))
+
+    def test_stock_return_df_above_2_valid(self):
+        self._call(_make_config(mc_stock_return_df=5.0))
+
+    def test_stock_ar1_phi_at_plus_one_raises(self):
+        with pytest.raises(ValueError, match="mc_stock_return_ar1_phi"):
+            self._call(_make_config(mc_stock_return_ar1_phi=1.0))
+
+    def test_stock_ar1_phi_at_minus_one_raises(self):
+        with pytest.raises(ValueError, match="mc_stock_return_ar1_phi"):
+            self._call(_make_config(mc_stock_return_ar1_phi=-1.0))
+
+    def test_stock_ar1_phi_valid(self):
+        self._call(_make_config(mc_stock_return_ar1_phi=-0.25))
+
+    def test_inflation_ar1_phi_at_one_raises(self):
+        with pytest.raises(ValueError, match="mc_inflation_ar1_phi"):
+            self._call(_make_config(mc_inflation_ar1_phi=1.0))
+
+    def test_inflation_ar1_phi_valid(self):
+        self._call(_make_config(mc_inflation_ar1_phi=0.6))
+
+    def test_negative_mean_uncertainty_raises(self):
+        with pytest.raises(ValueError, match="mc_stock_mean_uncertainty"):
+            self._call(_make_config(mc_stock_mean_uncertainty=-0.01))
+
+    def test_negative_vol_uncertainty_raises(self):
+        with pytest.raises(ValueError, match="mc_stock_vol_uncertainty"):
+            self._call(_make_config(mc_stock_vol_uncertainty=-0.01))
+
+    def test_decumulation_years_zero_raises(self):
+        with pytest.raises(ValueError, match="mc_decumulation_years"):
+            self._call(_make_config(mc_decumulation_years=0))
+
+    def test_decumulation_stock_pct_out_of_range_raises(self):
+        with pytest.raises(ValueError, match="mc_decumulation_stock_pct"):
+            self._call(_make_config(mc_decumulation_stock_pct=1.5))
+
+    def test_decumulation_glide_end_out_of_range_raises(self):
+        with pytest.raises(ValueError, match="mc_decumulation_glide_end_pct"):
+            self._call(_make_config(mc_decumulation_glide_end_pct=-0.1))
+
+    def test_negative_glide_years_raises(self):
+        with pytest.raises(ValueError, match="mc_decumulation_glide_years"):
+            self._call(_make_config(mc_decumulation_glide_years=-1))
+
+    def test_negative_pension_raises(self):
+        with pytest.raises(ValueError, match="mc_decumulation_pension_monthly"):
+            self._call(_make_config(mc_decumulation_pension_monthly=-100.0))
+
+    def test_valid_full_config_does_not_raise(self):
+        self._call(_make_config(
+            mc_stock_bond_correlation=-0.2,
+            mc_stock_return_df=5.0,
+            mc_stock_return_ar1_phi=-0.25,
+            mc_inflation_ar1_phi=0.6,
+            mc_stock_mean_uncertainty=0.015,
+            mc_stock_vol_uncertainty=0.03,
+            mc_decumulation_years=40,
+            mc_decumulation_stock_pct=0.4,
+            mc_decumulation_glide_end_pct=0.3,
+            mc_decumulation_glide_years=20,
+            mc_decumulation_pension_monthly=2500.0,
+        ))
