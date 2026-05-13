@@ -1,4 +1,5 @@
-from models import AllocationSweepResult, DecumulationResult, JointProbabilityResult, SORRResult
+from models import AllocationSweepResult, ChainedMCResult, DecumInflationCagrGrid, DecumulationResult, JointProbabilityResult, SORRResult, (
+    SWRSweepResult)
 from reports.formatters import _print_section, _print_subsection, format_currency
 
 
@@ -181,3 +182,100 @@ def print_allocation_sweep(sweep: AllocationSweepResult) -> None:
     print("  ← current plan   ★ optimal (max yr-30 GK survival)")
     print("  Note: required portfolio computed from income formula; "
           "all rows use identical random draws.")
+
+
+def print_chained_mc(result: ChainedMCResult) -> None:
+    _print_subsection("4.8  Chained Accumulation → Decumulation MC")
+    pcts = result.starting_portfolio_percentiles
+    print()
+    print(f"  {result.n_chained_paths:,} joint paths: accumulation phase feeds directly into decumulation.")
+    print(f"  Required portfolio at retirement: €{format_currency(result.required_portfolio)}")
+    print()
+    print(f"  Accumulated wealth at horizon — distribution:")
+    print(f"    P5 : €{format_currency(pcts[5]):>12}   P25: €{format_currency(pcts[25]):>12}"
+          f"   P50: €{format_currency(pcts[50]):>12}")
+    print(f"    P75: €{format_currency(pcts[75]):>12}   P95: €{format_currency(pcts[95]):>12}")
+    print()
+    print(f"  Paths reaching ≥ required at year-N : {result.accum_success_frac * 100:.1f}%")
+    print()
+
+    key_years = [10, 20, 30, 40]
+    n_years = len(result.survival_by_year)
+    print(f"  {'Year':<8}  {'Joint survival':>15}")
+    print("  " + "-" * 26)
+    for y in key_years:
+        if y <= n_years:
+            rate = result.survival_by_year[y - 1]
+            bar = f"[{'█' * round(rate * 20)}{'░' * (20 - round(rate * 20))}]"
+            print(f"  Year {y:<4}  {bar}  {rate * 100:5.1f}%")
+    print()
+
+    def _fmt_surv(v: float) -> str:
+        return f"{v * 100:.1f}%" if v == v else "n/a"  # nan check
+
+    print(f"  Conditional survival at year {n_years}:")
+    print(f"    Started with ≥ required ({result.accum_success_frac * 100:.1f}% of paths) "
+          f"→ {_fmt_surv(result.cond_survival_accum_success)} survive")
+    fail_frac = 1.0 - result.accum_success_frac
+    print(f"    Started with < required ({fail_frac * 100:.1f}% of paths) "
+          f"→ {_fmt_surv(result.cond_survival_accum_fail)} survive")
+    print()
+    print(f"  True joint P(accumulate AND survive {n_years} yr) : "
+          f"{result.joint_survival_rate * 100:.1f}%")
+
+
+def print_swr_sweep(result: SWRSweepResult) -> None:
+    _print_subsection("4.9  Withdrawal Rate Sensitivity")
+    print()
+    print(f"  Portfolio: €{format_currency(result.display_portfolio)}  "
+          f"(all rows share identical random draws — differences reflect SWR only)")
+    print()
+    print(f"  {'SWR':>6}  {'Monthly €':>12}  {'Yr 20':>8}  {'Yr 30':>8}  {'Yr 40':>8}")
+    print("  " + "-" * 52)
+    for pt in result.points:
+        tag = " ←" if abs(pt.swr - result.config_swr) < 0.001 else ""
+        print(
+            f"  {pt.swr * 100:>5.2f}%"
+            f"  €{format_currency(pt.monthly_withdrawal):>11}"
+            f"  {pt.survival_yr20 * 100:>7.1f}%"
+            f"  {pt.survival_yr30 * 100:>7.1f}%"
+            f"  {pt.survival_yr40 * 100:>7.1f}%"
+            f"{tag}"
+        )
+    print()
+    print("  ← config SWR")
+
+
+def print_decum_inflation_cagr_heatmap(result: DecumInflationCagrGrid) -> None:
+    _print_subsection("4.10  Decumulation Sensitivity — Inflation × Stock CAGR")
+    print()
+    print(f"  Portfolio: €{format_currency(result.display_portfolio)}  "
+          f"(fixed withdrawal, survival at year 30 / year 40)")
+    print()
+
+    def _cell(cell: "DecumInflationCagrCell", is_base: bool) -> str:
+        s = f"{cell.survival_yr30 * 100:.0f}/{cell.survival_yr40 * 100:.0f}"
+        return f"[{s}]" if is_base else f" {s} "
+
+    col_w = 9
+    header = f"  {'CPI↓  CAGR→':>12}"
+    for cagr in result.cagr_values:
+        marker = "*" if abs(cagr - result.base_cagr) < 1e-4 else " "
+        header += f"  {int(round(cagr * 100)):>2}%{marker} "
+    print(header)
+    sep = "  " + "-" * (13 + len(result.cagr_values) * col_w)
+    print(sep)
+
+    for i, inf in enumerate(result.inflation_values):
+        is_base_inf = abs(inf - result.base_inflation) < 1e-4
+        inf_label = f"{inf * 100:.1f}%{'←' if is_base_inf else ' '}"
+        row = f"  {inf_label:>12}"
+        for j in range(len(result.cagr_values)):
+            cell = result.grid[i][j]
+            is_base = is_base_inf and abs(result.cagr_values[j] - result.base_cagr) < 1e-4
+            row += f"  {_cell(cell, is_base):>7}"
+        print(row)
+
+    print(sep)
+    print(f"  Values = yr30%/yr40% survival.  * = base CAGR ({result.base_cagr * 100:.1f}%)  "
+          f"← = base CPI ({result.base_inflation * 100:.1f}%)  [x] = base case")

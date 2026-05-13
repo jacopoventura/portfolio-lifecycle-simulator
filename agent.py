@@ -66,57 +66,55 @@ _DEFAULT_MODEL = "claude-sonnet-4-6"
 _FALLBACK_MODEL = "claude-haiku-4-5-20251001"
 
 _UNIFIED_SYSTEM_PROMPT = """\
-You are a personal finance advisor reviewing a full retirement planning analysis in three parts:
-  1. Accumulation Monte Carlo — how to reach the target portfolio by 2041
+You are a personal finance advisor reviewing a full retirement planning analysis:
+  1. Accumulation Monte Carlo — reaching the target portfolio by retirement
   2. Decumulation Monte Carlo — whether that portfolio survives 40 years of withdrawals
   3. CAGR / instrument analysis — which ETFs credibly deliver the required stock return
 
-Answer exactly 11 questions, one bullet each, in this order.
-The required stock CAGR from accumulation (the minimum return needed to hit the target at the
-required success rate) is provided as a number. Use it as the benchmark in Q9 and Q11.
+The required stock CAGR (minimum return to hit the target at the required success rate) is
+provided as a number. Use it as the CAGR benchmark in Q4 and Q6.
 
-  Q1.  Target portfolio required at retirement — is the current plan on track?
-  Q2.  Best monthly stock + bond contribution pair for hitting the stock target (highest success rate).
-  Q3.  Best monthly stock + bond contribution pair for hitting the income target (any split).
-  Q4.  When is financial freedom reached at the required success rate with no contribution change?
-  Q5.  Optimal upfront cash reallocation to maximise income success rate. The recommended monthly
-       stock contribution must be at least the required monthly stock contribution shown in the
-       deterministic scenario results (the floor set by the projection, before MC optimisation).
-       If the MC grid's best pair falls below that floor, pick the best pair that respects it.
-  Q6.  Single most actionable accumulation recommendation (contributions + cash move + result year).
-       The monthly stock contribution must again be at least the deterministic required floor.
-       Explain briefly why going below that floor would leave the stock portfolio underfunded.
-  Q7.  Top 2 sensitivity risks to the IT plan: name, impact in pp, mitigation.
-  Q8.  Top 3 model scrutiny flags: issue, why suspicious, what to check.
-  Q9.  Decumulation viability: does the target portfolio survive 40 years? State the joint
-       probability P(accumulate AND survive). If below the target success rate, state by how much
-       and what minimum portfolio fixes it.
-  Q10. Instrument combinations: propose exactly 3 alternative portfolio combinations using
-       instruments from the CAGR analysis whose P5-10y CAGR meets or exceeds the required
-       stock CAGR. Each combination must have 2–4 instruments, low pairwise correlation, and
-       MDD within acceptable range. For each combination label it (e.g. "Option A — Growth"),
-       list every instrument as "Full Name (TICKER)" with its P5-10y CAGR, MDD, and suggested
-       allocation weight (weights sum to 100%). Constraint: QQQ allocation must not exceed 25%
-       in any combination. Prefer EU-eligible UCITS ETFs (✓ flag) unless a US instrument adds
-       meaningful diversification unavailable in the UCITS universe.
-  Q11. Holistic action plan: combine Q2/Q3 contributions, Q9 decumulation verdict, and the
-       recommended option from Q10 into one concrete plan. State which Q10 option you recommend
-       and why. If joint probability is below target, state which parameter to change and
-       re-simulate (higher contribution, lower withdrawal rate, or different instruments). Be specific.
+Answer exactly these 6 questions, one bullet each:
 
-Priority rules:
-- IT (Italy) scenario is the primary residence — lead with IT numbers; mention DE only when it differs.
+  Q1. Required portfolio & status: state the required portfolio at retirement, whether the
+      current plan reaches it, and the financial freedom year at the required success rate.
+
+  Q2. What to change: give the single best monthly stock + bond contribution pair and the
+      optimal upfront cash reallocation (stocks/bonds split) to hit the income target as
+      early as possible. State the resulting freedom year and success rate.
+      Then explicitly reconcile the two tables in the report: the "EXACT SPLIT" table shows
+      the monthly-only path (no lump sum), which requires high monthly stock contributions
+      because the cash pile is left idle; the "BEST CASH ALLOCATION TODAY" table deploys
+      existing cash upfront as a lump sum, so the required monthly contributions drop
+      significantly. Explain this trade-off in one sentence so the user is not confused.
+
+  Q3. Survival: does the target portfolio survive 40 years of withdrawals? State the joint
+      P(accumulate AND survive). If below the target success rate, state what fixes it
+      (higher contributions, lower SWR, or extended horizon).
+
+  Q4. Instruments: propose 2 ETF portfolio combinations whose P5-10y CAGR meets or exceeds
+      the required stock CAGR. Each combination: 2–4 instruments, low correlation, MDD within
+      range. Format each as "Name (TICKER) — weight%  |  P5 CAGR  |  MDD". QQQ ≤ 25%.
+      Prefer EU-eligible UCITS ETFs (✓) unless a US instrument adds meaningful diversification.
+
+  Q5. Top risks: name the 2 biggest risks to the plan, state each impact in percentage
+      points, and give one concrete mitigation per risk.
+
+  Q6. Action plan: one concrete recommendation combining contributions, cash move, best
+      instrument option from Q4, and decumulation check. State freedom year and success rate.
+
+Rules:
+- IT (Italy) is the primary scenario — lead with IT numbers; mention DE only if it differs.
 - Never invent numbers — every figure must come from the reports.
 - Flag explicitly if the target success rate is not achievable.
-- Express all monetary values in euros or thousands (e.g. €2,716k) — never billions.
-- Always write ETF names in full as "Full Name (TICKER)" format, e.g. "iShares Core MSCI World (IWDA.AS)".
+- Monetary values in euros or thousands (e.g. €2,716k) — never billions.
+- ETF names always as "Full Name (TICKER)".
 
-Output format — exactly 11 bullet points:
-- Labels: **Q1 —** through **Q11 —**
-- Start each bullet with a bold action verb
+Output format — exactly 6 bullet points, labels **Q1 —** through **Q6 —**:
+- Bold action verb after each label
 - At least one specific number per bullet
-- Maximum 45 words per bullet; Q6, Q7, Q8, Q9 may use up to 90 words; Q10 may use up to 200 words; Q11 up to 120 words
-- No preamble, no headers, no closing sentence
+- Q1, Q3, Q5: max 50 words. Q2: max 90 words. Q4: max 120 words. Q6: max 70 words.
+- No preamble, no headers, no closing sentence.
 """
 
 
@@ -180,7 +178,7 @@ def generate_unified_action_plan(
     cagr_agent_text: str,
     required_cagr_it: float | None = None,
     model: str = _DEFAULT_MODEL,
-    max_tokens: int = 3000,
+    max_tokens: int = 1500,
 ) -> str:
     """Unified AI action plan covering accumulation, decumulation and instrument selection."""
     cagr_note = (

@@ -39,6 +39,7 @@ from reports.section2 import (
 )
 from reports.section3 import (
     _print_top_allocations,
+    _print_top_portfolio_allocations,
     print_current_situation_mc,
     print_financial_freedom_report,
     print_optimal_allocation_report,
@@ -50,7 +51,6 @@ from reports.summary import (
     print_summary_q1,
     print_summary_q2a,
     print_summary_q2b,
-    print_summary_q3,
     print_summary_q4,
 )
 
@@ -103,6 +103,5 @@ __all__ = [
     "print_summary_q1",
     "print_summary_q2a",
     "print_summary_q2b",
-    "print_summary_q3",
     "print_summary_q4",
 ]

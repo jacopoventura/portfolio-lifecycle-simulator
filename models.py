@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -217,6 +217,14 @@ class FinancialFreedomResult:
 
 
 @dataclass
+class YearsToTargetsResult:
+    years_to_stocks: int | None
+    years_to_bonds: int | None
+    years_to_both: int | None
+    years_to_income: int | None
+
+
+@dataclass
 class AllocationGridPoint:
     extra_stocks: float
     extra_bonds: float
@@ -379,3 +387,48 @@ class InflationCagrGrid:
     monthly_stocks: float
     monthly_bonds: float
     grid: list[list[InflationCagrCell]]  # [inflation_idx][cagr_idx]
+
+
+@dataclass
+class DecumInflationCagrCell:
+    survival_yr30: float
+    survival_yr40: float
+
+
+@dataclass
+class DecumInflationCagrGrid:
+    display_portfolio: float
+    cagr_values: list[float]        # x-axis (decimal)
+    inflation_values: list[float]   # y-axis (decimal)
+    base_cagr: float
+    base_inflation: float
+    grid: list[list[DecumInflationCagrCell]]  # [inflation_idx][cagr_idx]
+
+
+@dataclass
+class SWRSweepPoint:
+    swr: float              # annual withdrawal rate (decimal, e.g. 0.028)
+    monthly_withdrawal: float
+    survival_yr20: float
+    survival_yr30: float
+    survival_yr40: float
+
+
+@dataclass
+class SWRSweepResult:
+    points: list[SWRSweepPoint]
+    config_swr: float        # SWR from config (decimal)
+    display_portfolio: float  # portfolio used for all rows
+
+
+@dataclass
+class ChainedMCResult:
+    """Result of a two-phase chained accumulation → decumulation Monte Carlo."""
+    n_chained_paths: int
+    required_portfolio: float
+    joint_survival_rate: float           # P(survive ny_decum years | start from accum distribution)
+    survival_by_year: list[float]        # length = mc_decumulation_years
+    accum_success_frac: float            # P(accumulated portfolio >= required_portfolio)
+    cond_survival_accum_success: float   # P(survive | accum >= required)
+    cond_survival_accum_fail: float      # P(survive | accum < required)
+    starting_portfolio_percentiles: dict[int, float]   # P5/P25/P50/P75/P95 of year-N wealth

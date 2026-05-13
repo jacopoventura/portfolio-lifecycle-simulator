@@ -23,7 +23,8 @@ converted using historical daily EUR/USD and GBP/EUR rates.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import shutil
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -36,20 +37,14 @@ import yfinance as yf
 
 # EU-available UCITS ETFs (all EUR-denominated unless noted)
 EU_TICKERS: list[str] = [
-    "VWCE.DE",   # Vanguard FTSE All-World Acc (Xetra)
     "IWDA.AS",   # iShares Core MSCI World Acc (Amsterdam)
-    "EUNL.DE",   # iShares Core MSCI World Dis (Xetra)
-    "VUSA.AS",   # Vanguard S&P 500 Dis (Amsterdam)
     "CSPX.L",    # iShares Core S&P 500 Acc (London, USD)
-    "XDWD.DE",   # Xtrackers MSCI World Swap Acc (Xetra)
     "VEVE.AS",   # Vanguard FTSE Developed World Acc (Amsterdam)
     "IS3R.DE",   # iShares Edge MSCI World Momentum Factor (Xetra)
     "XDEQ.DE",   # Xtrackers MSCI World Quality Factor (Xetra)
     "XDWT.DE",   # Xtrackers MSCI World Information Technology (Xetra)
     "TDIV.AS",   # VanEck Morningstar Developed Markets Dividend Leaders (Amsterdam)
-    "VFEM.AS",   # Vanguard FTSE Emerging Markets (Amsterdam)
     "IEMA.AS",   # iShares MSCI EM IMI Acc (Amsterdam)
-    "EXS1.DE",   # iShares Core DAX Acc (Xetra)
     "IGLN.L",    # iShares Physical Gold ETC (London, USD)
 ]
 
@@ -93,11 +88,10 @@ FX_TICKERS = {
 # Fallback currency map: used when t.info fails and to validate unexpected
 # currencies returned by Yahoo Finance.
 _KNOWN_CURRENCIES: dict[str, str] = {
-    "VWCE.DE": "EUR", "IWDA.AS": "EUR", "EUNL.DE": "EUR",
-    "VUSA.AS": "EUR", "XDWD.DE": "EUR", "VEVE.AS": "EUR",
+    "IWDA.AS": "EUR",
+    "VEVE.AS": "EUR",
     "IS3R.DE": "EUR", "XDEQ.DE": "EUR", "XDWT.DE": "EUR",
-    "TDIV.AS": "EUR", "VFEM.AS": "EUR", "IEMA.AS": "EUR",
-    "EXS1.DE": "EUR",
+    "TDIV.AS": "EUR", "IEMA.AS": "EUR",
     "CSPX.L": "USD",   # London-listed, USD share class
     "IGLN.L": "USD",   # London-listed physical gold ETC, USD share class
     "SPY": "USD", "QQQ": "USD", "VTI": "USD", "VEA": "USD", "VWO": "USD",
@@ -495,16 +489,28 @@ def _sort_key(r: TickerResult) -> float:
     return float("inf")  # no data → sort last
 
 
+def _name_col_width(fixed_overhead: int, min_w: int = 20) -> int:
+    cols = shutil.get_terminal_size((220, 50)).columns
+    return max(min_w, cols - fixed_overhead)
+
+
+def _short_ticker(ticker: str) -> str:
+    return ticker.split(".")[0]
+
+
 def print_summary_table(results: list[TickerResult]) -> None:
     labels = [_window_label(y) for y in WINDOW_YEARS]
-    tick_w = 10
-    name_w = 36
+    tick_w = 8
     dt_w = 8    # start / end date columns
     cw = 7      # CAGR columns
     av_w = 7    # Ann. σ
     ref_cw = 8  # min / max / std of reference window
 
     window_block = "".join(f"-{'-' * cw}-+" for _ in labels)
+    # fixed chars in sep excluding name_w: part1 + dates(22) + windows + av(10) + refs(44)
+    name_w = _name_col_width(
+        (2+tick_w+3+5) + 22 + len(WINDOW_YEARS) * (1 + cw + 2) + 10 + 44
+    )
     sep = (
         f"+-{'-' * tick_w}-+-{'-' * name_w}-+--+"
         f"-{'-' * dt_w}-+-{'-' * dt_w}-+"
@@ -546,7 +552,7 @@ def print_summary_table(results: list[TickerResult]) -> None:
         min_s = _pct(ref_w.cagr_min) if ref_w else "n/a"
         max_s = _pct(ref_w.cagr_max) if ref_w else "n/a"
         print(
-            f"| {r.ticker:<{tick_w}} | {r.name[:name_w]:<{name_w}} |{eu_flag}"
+            f"| {_short_ticker(r.ticker):<{tick_w}} | {r.name[:name_w]:<{name_w}} |{eu_flag}"
             f"| {r.data_from.strftime('%Y-%m'):>{dt_w}} | {r.data_to.strftime('%Y-%m'):>{dt_w}} |"
             f"{row_w}"
             f" {_pct(r.ann_vol_5y_eur):>{av_w}} |"
@@ -573,10 +579,13 @@ def print_detail_table(results: list[TickerResult], years: int | None) -> None:
     ]
     valid.sort(key=lambda x: -(x[1].cagr_mean or 0))
 
-    tick_w = 10
-    name_w = 36
+    tick_w = 8
     cw = 9
     is_single = (years is None)
+    # fixed chars in sep excluding name_w:
+    #   single:     part1(18) + from-col(12) + 2 cw cols(25) = 55
+    #   non-single: part1(18) + 7 cw cols(84) + windows-col(11) = 113
+    name_w = _name_col_width(53 if is_single else 113)
 
     if is_single:
         sep = f"+-{'-' * tick_w}-+-{'-' * name_w}-+--+-{'-' * 8}-+-{'-' * cw}-+-{'-' * cw}-+"
@@ -605,12 +614,12 @@ def print_detail_table(results: list[TickerResult], years: int | None) -> None:
         eu_flag = "✓ " if r.eu_available else "  "
         if is_single:
             print(
-                f"| {r.ticker:<{tick_w}} | {r.name[:name_w]:<{name_w}} |{eu_flag}"
+                f"| {_short_ticker(r.ticker):<{tick_w}} | {r.name[:name_w]:<{name_w}} |{eu_flag}"
                 f"| {r.data_from.strftime('%Y-%m'):>8} | {_pct(w.cagr_mean):>{cw}} | {_pct(r.ann_vol_eur):>{cw}} |"
             )
         else:
             print(
-                f"| {r.ticker:<{tick_w}} | {r.name[:name_w]:<{name_w}} |{eu_flag}"
+                f"| {_short_ticker(r.ticker):<{tick_w}} | {r.name[:name_w]:<{name_w}} |{eu_flag}"
                 f"| {_pct(w.cagr_mean):>{cw}} | {_pct(w.cagr_p05):>{cw}} | {_pct(w.cagr_p25):>{cw}} | {_pct(w.cagr_std):>{cw}} | {_pct(w.cagr_min):>{cw}} | {_pct(w.cagr_max):>{cw}} | {_pct(r.ann_vol_eur):>{cw}} |"
                 f" {w.n_windows:>8,} |"
             )
@@ -627,20 +636,28 @@ def print_final_summary(results: list[TickerResult]) -> None:
     ref_label = _window_label(ref)
 
     rk_w    = 2
-    tick_w  = 10
-    name_w  = 28
+    tick_w  = 8
     yr_w    = 4
     cw      = 7
-    nw      = 6   # n_windows column width
     cons_w  = 6
     av_w    = 6   # volatility columns (3 of them)
     mdd_w   = 7   # max drawdown
     ratio_w = 6   # Sharpe / Sortino / Calmar
     wr_w    = 6   # win rate for reference window
+    # fixed chars in sep excluding name_w: 30+29+20+27+10+27+9 = 152
+    name_w = _name_col_width(
+        (2+rk_w+3+tick_w+3+6+yr_w+2) +
+        (1+cw+3+cw+3+cons_w+2) +
+        (1+cw+3+cw+2) +
+        (1+av_w+3+av_w+3+av_w+2) +
+        (1+mdd_w+2) +
+        (1+ratio_w+3+ratio_w+3+ratio_w+2) +
+        (1+wr_w+2)
+    )
 
     sep = (
         f"+-{'-'*rk_w}-+-{'-'*tick_w}-+-{'-'*name_w}-+--+-{'-'*yr_w}-+"
-        f"-{'-'*cw}-+-{'-'*nw}-+-{'-'*cw}-+-{'-'*cons_w}-+"
+        f"-{'-'*cw}-+-{'-'*cw}-+-{'-'*cons_w}-+"
         f"-{'-'*cw}-+-{'-'*cw}-+"
         f"-{'-'*av_w}-+-{'-'*av_w}-+-{'-'*av_w}-+"
         f"-{'-'*mdd_w}-+"
@@ -650,7 +667,7 @@ def print_final_summary(results: list[TickerResult]) -> None:
     hdr = (
         f"| {'#':>{rk_w}} | {'Ticker':<{tick_w}} | {'Name':<{name_w}} |EU"
         f"| {'From':>{yr_w}} |"
-        f" {ref_label+' avg':>{cw}} | {'n':>{nw}} | {'P5-'+ref_label:>{cw}} | {'Cons.':>{cons_w}} |"
+        f" {ref_label+' avg':>{cw}} | {'P5-'+ref_label:>{cw}} | {'Cons.':>{cons_w}} |"
         f" {'5y avg':>{cw}} | {'All-time':>{cw}} |"
         f" {'σ-5y':>{av_w}} | {'σ-10y':>{av_w}} | {'σ-all':>{av_w}} |"
         f" {'MDD':>{mdd_w}} |"
@@ -663,11 +680,6 @@ def print_final_summary(results: list[TickerResult]) -> None:
         if w and w.cagr_mean is not None and w.cagr_std is not None and w.cagr_std > 0:
             return w.cagr_mean / w.cagr_std
         return None
-
-    def _nw_str(w: WindowStats | None) -> str:
-        if w is None or w.n_windows == 0:
-            return "n/a"
-        return f"{w.n_windows:,}"
 
     all_results = sorted(results, key=_sort_key)
 
@@ -685,10 +697,9 @@ def print_final_summary(results: list[TickerResult]) -> None:
         )
 
         print(
-            f"| {rank:>{rk_w}} | {r.ticker:<{tick_w}} | {r.name[:name_w]:<{name_w}} |{eu_flag}"
+            f"| {rank:>{rk_w}} | {_short_ticker(r.ticker):<{tick_w}} | {r.name[:name_w]:<{name_w}} |{eu_flag}"
             f"| {r.data_from.year:>{yr_w}} |"
             f" {_pct(w_ref.cagr_mean if w_ref else None):>{cw}} |"
-            f" {_nw_str(w_ref):>{nw}} |"
             f" {_pct(w_ref.cagr_p05  if w_ref else None):>{cw}} |"
             f" {(f'{cons:.1f}' if cons is not None else 'n/a'):>{cons_w}} |"
             f" {_pct(w_5y.cagr_mean  if w_5y  else None):>{cw}} |"
@@ -707,19 +718,6 @@ def print_final_summary(results: list[TickerResult]) -> None:
     for i, r in enumerate(all_results, 1):
         _row(i, r)
     print(sep)
-    print(
-        f"  Cons.   = {ref_label} mean CAGR ÷ {ref_label} std  "
-        f"(higher = more consistent outcome regardless of entry date)\n"
-        f"  P5-{ref_label} = 5th-percentile {ref_label} rolling CAGR — conservative planning input\n"
-        f"  MDD     = max peak-to-trough drawdown (e.g. -55% = lost 55% from peak)\n"
-        f"  σ-5y/10y/all = annualised daily vol — crypto annualised at 365 days, equities at ~252\n"
-        f"  Sharpe  = (all-time CAGR − {RISK_FREE_RATE*100:.1f}% RFR) / σ-all\n"
-        f"  Sortino = (all-time CAGR − {RISK_FREE_RATE*100:.1f}% RFR) / downside-σ  "
-        f"(only days below daily RFR threshold)\n"
-        f"  Calmar  = all-time CAGR / |MDD| — return per unit of worst drawdown (SORR proxy)\n"
-        f"  WR-{ref_label} = % of {ref_label} rolling windows with CAGR > 0 (historical win probability)"
-    )
-
 
 # ── Correlation matrix ────────────────────────────────────────────────────────
 
@@ -756,87 +754,36 @@ def print_correlation_matrix(results: list[TickerResult], prices: dict[str, pd.S
     n_years = (end - start).days / 365.25
     n_days  = int(df_ret.count().mean())
 
-    tick_w = max(len(t) for t in tickers)
-    cell_w = 6   # "  0.97" or " -0.05"
+    stickers = [_short_ticker(t) for t in tickers]
+    stw = max(len(s) for s in stickers)  # column/row label width
 
     print(f"  Common period : {start.date()} → {end.date()}"
           f"  ({n_years:.1f} years  |  ~{n_days:,} days/pair)")
     print()
 
-    # Legend
-    for i, t in enumerate(tickers, 1):
-        eu_flag = "✓" if t in eu_set else " "
-        print(f"    {i:>2}  {eu_flag}  {t}")
-    print()
-
     # Column header row
-    hdr = f"  {'':>{tick_w}}"
-    for i in range(1, n + 1):
-        hdr += f"  {i:>4}"
+    hdr = f"  {'':>{stw}}"
+    for st in stickers:
+        hdr += f"  {st:>{stw}}"
     print(hdr)
 
-    # Lower-triangular rows (diagonal shown as "────")
-    for i, ti in enumerate(tickers):
-        row = f"  {ti:>{tick_w}}"
+    # Lower-triangular rows (diagonal shown as dashes)
+    for i, (ti, st_i) in enumerate(zip(tickers, stickers)):
+        row = f"  {st_i:>{stw}}"
         for j in range(i):
             v = corr.loc[ti, tickers[j]]
-            row += "   n/a" if pd.isna(v) else f"  {v:>4.2f}"
-        row += "  ────"
+            row += "   n/a" if pd.isna(v) else f"  {v:>{stw}.2f}"
+        row += "  " + "─" * stw
         print(row)
 
 
 # ── Agent summary ─────────────────────────────────────────────────────────────
 
-def print_agent_summary(results: list[TickerResult]) -> None:
-    """Structured one-line-per-ticker summary optimised for AI agent consumption."""
-    from datetime import date as _date
-
-    all_r = sorted(results, key=_sort_key)
-    eu    = [r for r in all_r if r.eu_available]
-
-    def _cons_val(r: TickerResult) -> float | None:
-        w = r.windows.get(SORT_BY_WINDOW)
-        if w and w.cagr_mean is not None and w.cagr_std is not None and w.cagr_std > 0:
-            return w.cagr_mean / w.cagr_std
-        return None
-
-    def _ratio(v: float | None) -> str:
-        return "n/a" if v is None else f"{v:.2f}"
-
-    def _ticker_line(rank: int, r: TickerResult) -> str:
-        w10 = r.windows.get(SORT_BY_WINDOW)
-        w5  = r.windows.get(5)
-        wat = r.windows.get(None)
-        cons = _cons_val(r)
-        wr_s = (
-            f"{w10.win_rate * 100:.0f}%"
-            if w10 and w10.win_rate is not None else "n/a"
-        )
-        return (
-            f"  {rank:>2}. {r.ticker:<10}"
-            f"  10y={_pct(w10.cagr_mean if w10 else None)}"
-            f"  P5-10y={_pct(w10.cagr_p05 if w10 else None)}"
-            f"  Cons={_ratio(cons)}"
-            f"  5y={_pct(w5.cagr_mean if w5 else None)}"
-            f"  all={_pct(wat.cagr_mean if wat else None)}"
-            f"  σ5y={_pct(r.ann_vol_5y_eur)}"
-            f"  MDD={_pct(r.max_drawdown_eur)}"
-            f"  Sharpe={_ratio(r.sharpe_eur)}"
-            f"  Sortino={_ratio(r.sortino_eur)}"
-            f"  Calmar={_ratio(r.calmar_eur)}"
-            f"  WR-10y={wr_s}"
-            f"  from={r.data_from.year}"
-        )
-
+def print_analysis_notes(results: list[TickerResult]) -> None:
+    """Metric guide and key observations, printed after the final summary table."""
     ref_label = _window_label(SORT_BY_WINDOW)
-    print(f"  Generated  : {_date.today()}")
-    print(f"  Parameters : RFR={RISK_FREE_RATE*100:.1f}%  |  sort={ref_label} mean CAGR  |  prices in EUR")
-    print()
-    print("  QUESTION TO ANSWER:")
-    print("  Given a target portfolio value or target monthly income at the retirement")
-    print("  horizon — which instruments and combinations maximise the probability of")
-    print("  reaching that goal? Recommend: instrument list + allocation rationale.")
-    print()
+    all_r = sorted(results, key=_sort_key)
+
     print("  METRIC GUIDE:")
     print(f"  P5-10y  : conservative return input for Monte Carlo (5th-pct of rolling {ref_label} CAGRs)")
     print("  σ5y     : forward-looking vol input for Monte Carlo (recent 5-year regime; crypto at 365d/yr)")
@@ -848,25 +795,25 @@ def print_agent_summary(results: list[TickerResult]) -> None:
     print("  Corr    : see correlation matrix above — corr > 0.95 = redundant pair, pick one")
     print()
 
-    print("  ALL INSTRUMENTS — ranked by 10y mean CAGR (✓ = EU-eligible UCITS):")
-    for i, r in enumerate(all_r, 1):
-        print(_ticker_line(i, r))
-
-    # Key observations — combination-relevant highlights for the AI
-    print()
     print("  KEY OBSERVATIONS FOR COMBINATION SELECTION:")
+
+    def _cons_val(r: TickerResult) -> float | None:
+        w = r.windows.get(SORT_BY_WINDOW)
+        if w and w.cagr_mean is not None and w.cagr_std is not None and w.cagr_std > 0:
+            return w.cagr_mean / w.cagr_std
+        return None
 
     def _best(lst: list[TickerResult], key, label: str, fmt) -> None:
         valid = [(r, key(r)) for r in lst if key(r) is not None]
         if valid:
             r, v = max(valid, key=lambda x: x[1])
-            print(f"  - {label:<28}: {r.ticker}  ({fmt(v)})")
+            print(f"  - {label:<28}: {_short_ticker(r.ticker)}  ({fmt(v)})")
 
     def _worst(lst: list[TickerResult], key, label: str, fmt) -> None:
         valid = [(r, key(r)) for r in lst if key(r) is not None]
         if valid:
             r, v = min(valid, key=lambda x: x[1])
-            print(f"  - {label:<28}: {r.ticker}  ({fmt(v)})")
+            print(f"  - {label:<28}: {_short_ticker(r.ticker)}  ({fmt(v)})")
 
     _best(all_r, lambda r: r.sharpe_eur,   "Best Sharpe",       lambda v: f"{v:.2f}")
     _best(all_r, lambda r: r.sortino_eur,  "Best Sortino",      lambda v: f"{v:.2f}")
@@ -874,9 +821,9 @@ def print_agent_summary(results: list[TickerResult]) -> None:
     _best(all_r, _cons_val,                "Most consistent",   lambda v: f"Cons={v:.1f}")
     _best(all_r, lambda r: (r.windows[SORT_BY_WINDOW].cagr_p05
                             if SORT_BY_WINDOW in r.windows else None),
-              f"Best P5-{ref_label}",   _pct)
-    _worst(all_r, lambda r: r.ann_vol_5y_eur, "Lowest σ-5y",    _pct)
-    _worst(all_r, lambda r: r.max_drawdown_eur, "Shallowest MDD", _pct)
+          f"Best P5-{ref_label}",          _pct)
+    _worst(all_r, lambda r: r.ann_vol_5y_eur,    "Lowest σ-5y",    _pct)
+    _worst(all_r, lambda r: r.max_drawdown_eur,  "Shallowest MDD", _pct)
 
 
 # ── Portfolio Optimiser ───────────────────────────────────────────────────────
@@ -908,6 +855,7 @@ class OptimalPortfolioResult:
     n_years: float
     strategies: dict[str, PortfolioStrategy]
     recommended: str                          # key of recommended strategy
+    shrinkage_info: dict | None = field(default=None)
 
 
 def _portfolio_stats(
@@ -986,6 +934,22 @@ def _run_optimization(
     return best_w
 
 
+def _oas_covariance(X_centered: np.ndarray) -> tuple[np.ndarray, float]:
+    """Oracle Approximating Shrinkage estimator (Chen et al. 2010).
+    Shrinks sample covariance toward (trace(S)/p) * I.
+    Returns (cov_shrunk, delta) where delta is the shrinkage coefficient."""
+    T, p = X_centered.shape
+    S = X_centered.T @ X_centered / T
+    trace_S  = np.trace(S)
+    trace_S2 = np.trace(S @ S)
+    mu_target = trace_S / p
+    num = (1.0 - 2.0 / p) * trace_S2 + trace_S ** 2
+    den = (T + 1.0 - 2.0 / p) * (trace_S2 - trace_S ** 2 / p)
+    delta = float(np.clip(num / den, 0.0, 1.0)) if den > 1e-12 else 1.0
+    cov_shrunk = (1.0 - delta) * S + delta * mu_target * np.eye(p)
+    return cov_shrunk, delta
+
+
 def compute_optimal_portfolio(
     results: list[TickerResult],
     prices_eur: dict[str, pd.Series],
@@ -996,6 +960,8 @@ def compute_optimal_portfolio(
     min_weight_threshold: float = 0.05,
     min_history_years: float = 5.0,
     selected_strategy: str | None = None,
+    use_bayesian_shrinkage: bool = False,
+    shrink_mean_intensity: float = 0.5,
 ) -> OptimalPortfolioResult | None:
     """Find optimal portfolio weights via Max-Sortino, Max-Sharpe, Min-Variance, and Equal Weight.
 
@@ -1157,6 +1123,46 @@ def compute_optimal_portfolio(
             return None
         return float((w @ corr_matrix @ w - hhi) / denom)
 
+    # ── Bayesian shrinkage (optional, --advanced-optimization) ───────────────
+    shrinkage_info: dict | None = None
+    if use_bayesian_shrinkage:
+        mu_sample_daily = ret_array.mean(axis=0)
+        mu_prior_daily  = np.full(n, mu_sample_daily.mean())
+        mu_shrunk_daily = ((1.0 - shrink_mean_intensity) * mu_sample_daily
+                           + shrink_mean_intensity * mu_prior_daily)
+        mu_shrunk_ann   = mu_shrunk_daily * tdpy
+
+        X_centered          = ret_array - mu_sample_daily
+        cov_shrunk_daily, delta_oas = _oas_covariance(X_centered)
+        cov_shrunk_ann      = cov_shrunk_daily * tdpy
+
+        shrinkage_info = {
+            "delta_oas":            delta_oas,
+            "kappa_mean":           shrink_mean_intensity,
+            "grand_mean_ann":       float(mu_prior_daily.mean() * tdpy),
+            "mu_sample_ann":        {t: float(mu_sample_daily[i] * tdpy) for i, t in enumerate(eligible)},
+            "mu_shrunk_ann":        {t: float(mu_shrunk_ann[i])          for i, t in enumerate(eligible)},
+        }
+
+        # Redefine affected objectives to use shrunken parameters.
+        # P50/P1 objectives intentionally left unchanged (rolling pct already conservative).
+        def _neg_sortino(w: np.ndarray) -> float:
+            pr = ret_array @ w
+            port_ret = float(w @ mu_shrunk_ann)
+            dv = float(np.sqrt(np.mean(np.minimum(pr - daily_rfr, 0.0) ** 2) * tdpy))
+            return -(port_ret - RISK_FREE_RATE) / dv if dv > 1e-8 else 0.0
+
+        def _neg_sharpe(w: np.ndarray) -> float:
+            port_ret = float(w @ mu_shrunk_ann)
+            vol = float(np.sqrt(max(float(w @ cov_shrunk_ann @ w), 0.0)))
+            return -(port_ret - RISK_FREE_RATE) / vol if vol > 1e-8 else 0.0
+
+        def _variance(w: np.ndarray) -> float:
+            return float(max(float(w @ cov_shrunk_ann @ w), 0.0))
+
+        def _neg_cagr(w: np.ndarray) -> float:
+            return -float(w @ mu_shrunk_ann)
+
     # ── Run all strategies ────────────────────────────────────────────────────
     def _make_strategy(name: str, w_raw: np.ndarray) -> PortfolioStrategy:
         w = _clean_weights(w_raw)
@@ -1219,6 +1225,7 @@ def compute_optimal_portfolio(
         n_years=n_years,
         strategies=strategies,
         recommended=recommended,
+        shrinkage_info=shrinkage_info,
     )
 
 
@@ -1239,14 +1246,27 @@ def print_optimal_portfolio(result: OptimalPortfolioResult) -> None:
     TC, NC, SC = 10, 28, 10
     W = TC + NC + SC * len(KEYS) + 2   # +2 for leading "  " indent
 
-    print("=" * W)
-    print(f"{'PORTFOLIO OPTIMISER':^{W}}")
-    print("=" * W)
     print(f"  Common history : {result.common_from} → {result.common_to}"
           f"  ({result.n_years:.1f} yr,  {result.n_trading_days:,} days)")
     if result.excluded:
         for t, reason in result.excluded:
             print(f"  Excluded       : {t}  ({reason})")
+
+    if result.shrinkage_info is not None:
+        si = result.shrinkage_info
+        print()
+        print(f"  [Advanced] Bayesian shrinkage active")
+        print(f"    Covariance : OAS estimator  "
+              f"(δ = {si['delta_oas']:.2f}  →  diagonal target)")
+        print(f"    Returns    : James-Stein     "
+              f"(κ = {si['kappa_mean']:.2f}  →  grand mean "
+              f"{si['grand_mean_ann']*100:.1f}%/yr)")
+        print(f"    {'Ticker':>6}   {'Sample':>8}   {'Shrunk':>8}   {'Δ':>6}")
+        for tkr in result.eligible_tickers:
+            s = si["mu_sample_ann"].get(tkr, 0.0)
+            sh = si["mu_shrunk_ann"].get(tkr, 0.0)
+            print(f"    {_short_ticker(tkr):>6}   {s*100:>+7.1f}%   {sh*100:>+7.1f}%"
+                  f"   {(sh-s)*100:>+5.1f}pp")
     print()
 
     # ── Legend ───────────────────────────────────────────────────────────────
@@ -1278,7 +1298,7 @@ def print_optimal_portfolio(result: OptimalPortfolioResult) -> None:
     # Weight rows
     for ticker in result.eligible_tickers:
         eu_flag = " ✓" if ticker in EU_TICKERS else ""
-        label = (ticker + eu_flag)[:TC]
+        label = (_short_ticker(ticker) + eu_flag)[:TC]
         raw_name = result.ticker_names.get(ticker, "")
         for suffix in (" UCITS ETF USD (Acc)", " UCITS ETF USD Distributing",
                        " UCITS ETF 1C", " UCITS ETF", " Trust", " ETC"):
@@ -1349,6 +1369,8 @@ def compute_cardinality_sweep(
     min_history_years: float,
     strategy_key: str = "max_sortino",
     max_k: int | None = None,
+    use_bayesian_shrinkage: bool = False,
+    shrink_mean_intensity: float = 0.5,
 ) -> list[tuple[int, OptimalPortfolioResult]]:
     """For each k from 2 to min(len(eligible), max_k), enumerate all C(n,k) subsets,
     run the optimizer, and return the best portfolio per k for the given strategy."""
@@ -1372,8 +1394,10 @@ def compute_cardinality_sweep(
                     max_weight_per_ticker=max_weight_per_ticker,
                     qqq_max_weight=qqq_max_weight,
                     gold_max_weight=gold_max_weight,
-                    min_weight_threshold=0.0,  # don't zero out — enforce exactly k tickers
+                    min_weight_threshold=0.0,
                     min_history_years=min_history_years,
+                    use_bayesian_shrinkage=use_bayesian_shrinkage,
+                    shrink_mean_intensity=shrink_mean_intensity,
                 )
             if opt is None or strategy_key not in opt.strategies:
                 continue
@@ -1390,58 +1414,96 @@ def compute_cardinality_sweep(
     return sweep
 
 
-def print_cardinality_sweep(
-    sweep: list[tuple[int, OptimalPortfolioResult]],
+def print_portfolio_final_summary(
+    opt_result: "OptimalPortfolioResult",
     strategy_key: str,
+    sweep: "list[tuple[int, OptimalPortfolioResult]] | None" = None,
+    sp500_prices: "pd.Series | None" = None,
 ) -> None:
-    W = 92
-    STRAT_LABELS = {
+    """Aligned table: full-set + each cardinality sweep result + S&P 500 reference row."""
+    strat_label = {
         "max_sortino": "Max Sortino", "max_sharpe": "Max Sharpe",
         "min_variance": "Min Variance", "max_cagr": "Max CAGR",
         "max_p50_cagr": "Max P50 CAGR", "max_p1_cagr": "Max P1 CAGR",
         "equal_weight": "Equal Weight",
-    }
-    label = STRAT_LABELS.get(strategy_key, strategy_key)
+    }.get(strategy_key, strategy_key)
 
-    print("=" * W)
-    print(f"{'CARDINALITY SWEEP — ' + label:^{W}}")
-    print("=" * W)
-    print(f"  Best portfolio found by exhaustive subset search for each portfolio size.\n")
+    # Column widths
+    k_w      = 3
+    p50_w    = 6
+    p5_w     = 6
+    s_w      = 6
+    sort_w   = 7
+    mdd_w    = 7
+    corr_w   = 8
+    # fixed chars per row: 2(indent)+k_w+2 + alloc_w+2 + p50_w+2 + p5_w+2 + s_w+2 + sort_w+2 + mdd_w+2 + corr_w
+    fixed    = 2 + k_w + 2 + 2 + p50_w + 2 + p5_w + 2 + s_w + 2 + sort_w + 2 + mdd_w + 2 + corr_w
+    alloc_w  = max(40, shutil.get_terminal_size((120, 50)).columns - fixed)
 
-    # Column header
-    print(f"  {'k':<3}  {'Tickers & weights':<48}  {'History':>7}  "
-          f"{'P50-CAGR':>9}  {'σ-annual':>8}  {'Sortino':>8}  {'MDD':>7}  {'Avg corr':>8}")
-    print("  " + "─" * 98)
+    def _alloc(result: "OptimalPortfolioResult", key: str) -> str:
+        strat = result.strategies[key]
+        parts = [
+            f"{_short_ticker(t)} {strat.weights.get(t, 0) * 100:.0f}%"
+            for t in result.eligible_tickers
+            if strat.weights.get(t, 0) >= 0.005
+        ]
+        return " + ".join(parts)
 
-    for k, result in sweep:
-        strat = result.strategies[strategy_key]
-        use_p50 = result.n_years >= 10
-        cagr    = strat.portfolio_cagr_p50 if use_p50 else strat.portfolio_cagr
-        cagr_s  = f"{cagr * 100:.1f}%" if cagr is not None else "n/a"
-        ann_s   = (f"{strat.portfolio_annual_ret_std * 100:.1f}%"
-                   if strat.portfolio_annual_ret_std is not None else "n/a")
-        srt_s   = f"{strat.portfolio_sortino:.2f}" if strat.portfolio_sortino is not None else "n/a"
-        mdd_s   = f"{strat.portfolio_mdd * 100:.1f}%" if strat.portfolio_mdd is not None else "n/a"
-        corr_s  = f"{strat.portfolio_avg_corr:.2f}" if strat.portfolio_avg_corr is not None else "n/a"
-        hist_s  = f"{result.n_years:.1f}yr"
+    def _row(k_label: str, alloc: str, p50: str, p5: str, sig: str,
+             sortino: str, mdd: str, corr: str = "—") -> None:
+        print(f"  {k_label:>{k_w}}  {alloc:<{alloc_w}}"
+              f"  {p50:>{p50_w}}  {p5:>{p5_w}}  {sig:>{s_w}}"
+              f"  {sortino:>{sort_w}}  {mdd:>{mdd_w}}  {corr:>{corr_w}}")
 
-        # Build compact "TICK w% + TICK w%" string (strip exchange suffix for brevity)
-        def _abbr(t: str) -> str:
-            for sfx in (".AS", ".DE", ".L", "-USD"):
-                t = t.replace(sfx, "")
-            return t
+    def _fmt_strat(strat: "PortfolioStrategy", n_years: float) -> tuple[str, str, str, str, str, str]:
+        use_p50 = n_years >= 10
+        cagr = strat.portfolio_cagr_p50 if use_p50 else strat.portfolio_cagr
+        p50  = f"{cagr * 100:.1f}%"      if cagr is not None                    else "n/a"
+        p5   = f"{strat.portfolio_cagr_p5 * 100:.1f}%" if strat.portfolio_cagr_p5 is not None else "n/a"
+        sig  = f"{strat.portfolio_annual_ret_std * 100:.1f}%" if strat.portfolio_annual_ret_std is not None else "n/a"
+        srt  = f"{strat.portfolio_sortino:.2f}"  if strat.portfolio_sortino is not None else "n/a"
+        mdd  = f"{strat.portfolio_mdd * 100:.1f}%" if strat.portfolio_mdd is not None else "n/a"
+        corr = f"{strat.portfolio_avg_corr:.2f}"  if strat.portfolio_avg_corr is not None else "n/a"
+        return p50, p5, sig, srt, mdd, corr
 
-        parts = []
-        for t in result.eligible_tickers:
-            w = strat.weights.get(t, 0.0)
-            if w >= 0.005:
-                parts.append(f"{_abbr(t)} {w * 100:.0f}%")
-        tickers_s = " + ".join(parts)
-        if len(tickers_s) > 48:
-            tickers_s = tickers_s[:45] + "..."
+    W = 2 + k_w + 2 + alloc_w + 2 + p50_w + 2 + p5_w + 2 + s_w + 2 + sort_w + 2 + mdd_w
+    print(f"{'OPTIMAL PORTFOLIO — FINAL SUMMARY':^{W}}")
+    print(f"  Strategy : {strat_label}")
+    print()
 
-        print(f"  {k:<3}  {tickers_s:<48}  {hist_s:>7}  "
-              f"{cagr_s:>9}  {ann_s:>8}  {srt_s:>8}  {mdd_s:>7}  {corr_s:>8}")
+    # Header
+    _row("k", "Allocation", "P50", "P5", "σ", "Sortino", "MDD", "Avg corr")
+    print("  " + "─" * (W - 2))
+
+    # Full-set row
+    if strategy_key in opt_result.strategies:
+        strat = opt_result.strategies[strategy_key]
+        p50, p5, sig, srt, mdd, corr = _fmt_strat(strat, opt_result.n_years)
+        alloc = _alloc(opt_result, strategy_key)
+        _row("all", alloc, p50, p5, sig, srt, mdd, corr)
+
+    # Cardinality sweep rows
+    if sweep:
+        for k, result in sweep:
+            if strategy_key not in result.strategies:
+                continue
+            strat = result.strategies[strategy_key]
+            p50, p5, sig, srt, mdd, corr = _fmt_strat(strat, result.n_years)
+            alloc = _alloc(result, strategy_key)
+            _row(str(k), alloc, p50, p5, sig, srt, mdd, corr)
+
+    # S&P 500 reference row
+    if sp500_prices is not None:
+        ref = _era_stats(sp500_prices, "2000-01-01", None)
+        if ref["cagr"] is not None:
+            print("  " + "─" * (W - 2))
+            _row(
+                "ref",
+                f"S&P 500  2000–today  [{ref['yr_from']}–{ref['yr_to']}]",
+                f"{ref['cagr'] * 100:.1f}%", "—",
+                f"{ref['vol']  * 100:.1f}%", "—",
+                f"{ref['mdd']  * 100:.1f}%",
+            )
 
     print()
 
@@ -1452,10 +1514,9 @@ BENCHMARK_WINDOWS: list[int] = [5, 10, 15, 20, 25]
 
 # Human-readable names (Yahoo Finance .info can be slow for indices; hardcode fallback)
 _BENCHMARK_NAMES: dict[str, str] = {
-    "^GSPC":    "S&P 500",
-    "^IXIC":    "NASDAQ Composite",
+    "^GSPC":     "S&P 500",
+    "^IXIC":     "NASDAQ Composite",
     "^STOXX50E": "Euro Stoxx 50",
-    "^W5000":   "Wilshire 5000",
 }
 
 
@@ -1519,9 +1580,7 @@ def print_benchmark_table(
     DC  = 14   # history + currency column
     WC  = 10   # per-window column
 
-    print("=" * W)
     print(f"{title:^{W}}")
-    print("=" * W)
     if note:
         print(f"  {note}")
     print(f"  Each cell = mean CAGR across every possible start date for that window.")
@@ -1565,21 +1624,659 @@ def print_benchmark_table(
     print()
 
 
+# Era boundaries: (label, start_inclusive, end_exclusive)  None = data boundary
+_ERAS: list[tuple[str, str | None, str | None]] = [
+    ("Pre-2000",   None,         "2000-01-01"),
+    ("2000–2009",  "2000-01-01", "2010-01-01"),
+    ("2009–today", "2009-01-01", None),
+    ("2000–today", "2000-01-01", None),
+]
+
+
+def _era_stats(prices: pd.Series, start: str | None, end: str | None) -> dict:
+    """Point-to-point CAGR, MDD, and annualised vol for a price slice."""
+    s = prices.copy()
+    if start:
+        s = s[s.index >= pd.Timestamp(start)]
+    if end:
+        s = s[s.index < pd.Timestamp(end)]
+    if len(s) < 20:
+        return {"cagr": None, "mdd": None, "vol": None, "yr_from": None, "yr_to": None}
+    n_years = (s.index[-1] - s.index[0]).days / 365.25
+    cagr = (s.iloc[-1] / s.iloc[0]) ** (1 / n_years) - 1
+    cum  = s / s.iloc[0]
+    peak = cum.cummax()
+    mdd  = float(((cum - peak) / peak).min())
+    log_ret = np.log(s).diff().dropna()
+    tdpy = len(log_ret) / n_years          # trading days per year (handles crypto)
+    vol  = float(np.std(log_ret, ddof=1) * np.sqrt(tdpy))
+    return {
+        "cagr":    float(cagr),
+        "mdd":     mdd,
+        "vol":     vol,
+        "yr_from": s.index[0].year,
+        "yr_to":   s.index[-1].year,
+    }
+
+
+def _era_rolling_stats(prices: pd.Series, start: str | None, end: str | None) -> dict:
+    """p10/p50/p90 of CAGR, MDD, and vol across all entry days in the first year of the era."""
+    _null = {k: None for k in (
+        "cagr_p10", "cagr_p50", "cagr_p90",
+        "mdd_p10",  "mdd_p50",  "mdd_p90",
+        "vol_p10",  "vol_p50",  "vol_p90",
+        "yr_from",  "yr_to",
+    )}
+    s = prices.copy()
+    if end:
+        s = s[s.index < pd.Timestamp(end)]
+    if start:
+        s = s[s.index >= pd.Timestamp(start)]
+    if len(s) < 20:
+        return _null
+
+    year_one_end = s.index[0] + pd.DateOffset(years=1)
+    entry_days   = s.index[s.index < year_one_end]
+
+    cagrs, mdds, vols = [], [], []
+    yr_to = None
+    for day in entry_days:
+        st = _era_stats(prices, day.strftime("%Y-%m-%d"), end)
+        if st["cagr"] is None:
+            continue
+        cagrs.append(st["cagr"])
+        mdds.append(st["mdd"])
+        vols.append(st["vol"])
+        yr_to = st["yr_to"]
+
+    if not cagrs:
+        return _null
+
+    ca = np.array(cagrs)
+    md = np.array(mdds)
+    vo = np.array(vols)
+    return {
+        "cagr_p10": float(np.percentile(ca, 10)), "cagr_p50": float(np.percentile(ca, 50)), "cagr_p90": float(np.percentile(ca, 90)),
+        "mdd_p10":  float(np.percentile(md, 10)), "mdd_p50":  float(np.percentile(md, 50)), "mdd_p90":  float(np.percentile(md, 90)),
+        "vol_p10":  float(np.percentile(vo, 10)), "vol_p50":  float(np.percentile(vo, 50)), "vol_p90":  float(np.percentile(vo, 90)),
+        "yr_from": s.index[0].year,
+        "yr_to":   yr_to,
+    }
+
+
+def _fmt_pct_triple(p10: float, p50: float, p90: float, sign: bool = False) -> str:
+    fmt = "+.1f" if sign else ".1f"
+    return f"{p10*100:{fmt}}/{p50*100:{fmt}}/{p90*100:{fmt}}%"
+
+
+def print_benchmark_era_table(
+    benchmark_data: list[tuple[str, pd.Series, str, dict]],
+    era_horizon_year: int | None = None,
+    horizon_years: int | None = None,
+) -> None:
+    """Per-regime p10/p50/p90 CAGR, MDD, and vol — rolling over entry days in year one of each era."""
+    if not benchmark_data:
+        return
+
+    eras = list(_ERAS)
+    if horizon_years is not None:
+        end_year = 2000 + horizon_years
+        eras.append((f"2000–{end_year}", "2000-01-01", f"{end_year + 1}-01-01"))
+    if era_horizon_year is not None:
+        eras.append((f"2000–{era_horizon_year}", "2000-01-01", f"{era_horizon_year + 1}-01-01"))
+
+    NC, EC, CC, VC = 20, 14, 12, 22   # name, era, coverage, triple-value col widths
+    W = NC + EC + CC + VC * 3 + 14
+
+    print(f"{'BENCHMARK INDICES — ERA ANALYSIS':^{W}}")
+    print("  p10 / p50 / p90 across all entry days in the first calendar year of each era.")
+    print("  p10 = bad-luck entry, p50 = typical, p90 = good-luck entry.")
+    if era_horizon_year is not None:
+        print(f"  2000–{era_horizon_year} : lost-decade stress test — {era_horizon_year - 2000}yr horizon starting at the dot-com peak.")
+    print()
+    hdr = (f"  {'Index':<{NC}}  {'Era':<{EC}}  {'Coverage':<{CC}}"
+           f"  {'CAGR p10/p50/p90':>{VC}}  {'MDD p10/p50/p90':>{VC}}  {'σ-ann p10/p50/p90':>{VC}}")
+    print(hdr)
+
+    for ticker, prices, currency, _ in benchmark_data:
+        name = _BENCHMARK_NAMES.get(ticker, ticker)
+        print("  " + "─" * (W - 2))
+        for era_label, era_start, era_end in eras:
+            s = _era_rolling_stats(prices, era_start, era_end)
+            if s["cagr_p50"] is None:
+                continue
+            coverage = f"{s['yr_from']}–{s['yr_to']}"
+            cagr_s = _fmt_pct_triple(s["cagr_p10"], s["cagr_p50"], s["cagr_p90"], sign=True)
+            mdd_s  = _fmt_pct_triple(s["mdd_p10"],  s["mdd_p50"],  s["mdd_p90"])
+            vol_s  = _fmt_pct_triple(s["vol_p10"],  s["vol_p50"],  s["vol_p90"])
+            print(f"  {name:<{NC}}  {era_label:<{EC}}  {coverage:<{CC}}"
+                  f"  {cagr_s:>{VC}}  {mdd_s:>{VC}}  {vol_s:>{VC}}")
+            name = ""
+
+    print()
+
+
+def print_forward_cagr_estimates(
+    benchmark_data: list[tuple[str, pd.Series, str, dict]],
+    horizon_years: int,
+    inflation: float,
+    cape_ratio: float | None = None,
+    cape_long_run_mean: float = 17.0,
+    cape_eps_growth: float = 0.015,
+    n_simulations: int = 50_000,
+    initial_stock: float = 0.0,
+    monthly_contribution: float = 0.0,
+) -> None:
+    """CAPE-implied forward CAGR + two-phase lost-decade Monte Carlo stress test."""
+    W = 70
+    print(f"{'FORWARD CAGR ESTIMATES — HORIZON ' + str(horizon_years) + 'yr':^{W}}")
+    print()
+
+    # ── CAPE-implied forward CAGR ─────────────────────────────────────────────
+    if cape_ratio is not None and cape_ratio > 0:
+        earnings_yield = 1.0 / cape_ratio
+        # Valuation drag: CAPE mean-reverts to long-run mean over the horizon
+        # contribution = (CAPE_mean/CAPE)^(1/N) - 1  (negative when CAPE > mean)
+        reversion = (cape_long_run_mean / cape_ratio) ** (1.0 / horizon_years) - 1.0
+        real_cagr    = earnings_yield + cape_eps_growth + reversion
+        nominal_cagr = (1.0 + real_cagr) * (1.0 + inflation) - 1.0
+
+        print("  CAPE-implied forward CAGR:")
+        print(f"    Current CAPE          : {cape_ratio:.1f}")
+        print(f"    Earnings yield (1/CAPE): {earnings_yield * 100:+.2f}%")
+        print(f"    Real EPS growth       : {cape_eps_growth * 100:+.2f}%")
+        print(f"    CAPE reversion drag   : {reversion * 100:+.2f}%"
+              f"  ({cape_ratio:.0f} → {cape_long_run_mean:.0f} over {horizon_years}yr)")
+        print(f"    {'─' * 38}")
+        print(f"    Implied real CAGR     : {real_cagr * 100:.1f}%")
+        print(f"    Implied nominal CAGR  : {nominal_cagr * 100:.1f}%"
+              f"  (+ {inflation * 100:.1f}% inflation)")
+        print()
+
+    # ── Two-phase stress test ─────────────────────────────────────────────────
+    # Use S&P 500 era stats (2000-2009 = lost decade, 2009-today = recovery)
+    sp500_prices = next(
+        (prices for ticker, prices, _, _ in benchmark_data if ticker == "^GSPC"), None
+    )
+    if sp500_prices is None:
+        return
+
+    lost = _era_stats(sp500_prices, "2000-01-01", "2010-01-01")
+    rec  = _era_stats(sp500_prices, "2009-01-01", None)
+    if lost["cagr"] is None or rec["cagr"] is None:
+        return
+
+    # Geometric → arithmetic mean:  arithmetic ≈ geometric + σ²/2
+    phase1_mean = lost["cagr"] + 0.5 * lost["vol"] ** 2
+    phase2_mean = rec["cagr"]  + 0.5 * rec["vol"]  ** 2
+    phase1_std  = lost["vol"]
+    phase2_std  = rec["vol"]
+    phase1_yrs  = min(10, horizon_years)
+    phase2_yrs  = max(0, horizon_years - phase1_yrs)
+
+    rng = np.random.default_rng(42)
+    r1  = np.maximum(rng.normal(phase1_mean, phase1_std, (n_simulations, phase1_yrs)), -0.99)
+    fv  = np.prod(1.0 + r1, axis=1)
+    if phase2_yrs > 0:
+        r2  = np.maximum(rng.normal(phase2_mean, phase2_std, (n_simulations, phase2_yrs)), -0.99)
+        fv  = fv * np.prod(1.0 + r2, axis=1)
+    cagrs = fv ** (1.0 / horizon_years) - 1.0
+
+    p5, p25, p50, p75, p95 = (float(np.percentile(cagrs, p)) for p in (5, 25, 50, 75, 95))
+    prob_positive = float(np.mean(cagrs > 0)) * 100
+    prob_above5   = float(np.mean(cagrs > 0.05)) * 100
+
+    print("  Two-phase stress test  (S&P 500 as equity proxy, native USD):")
+    print(f"    Phase 1 — {phase1_yrs:2d}yr lost decade : "
+          f"mean={phase1_mean * 100:+.1f}%  σ={phase1_std * 100:.1f}%"
+          f"  ({lost['yr_from']}–{lost['yr_to']})")
+    if phase2_yrs > 0:
+        print(f"    Phase 2 — {phase2_yrs:2d}yr recovery    : "
+              f"mean={phase2_mean * 100:+.1f}%  σ={phase2_std * 100:.1f}%"
+              f"  ({rec['yr_from']}–{rec['yr_to']})")
+    print(f"    {n_simulations:,} simulations  |  total horizon {horizon_years}yr")
+    print(f"    {'─' * 38}")
+    print(f"    P5  CAGR : {p5  * 100:.1f}%   (worst 5% of outcomes)")
+    print(f"    P25 CAGR : {p25 * 100:.1f}%")
+    print(f"    P50 CAGR : {p50 * 100:.1f}%   (median outcome)")
+    print(f"    P75 CAGR : {p75 * 100:.1f}%")
+    print(f"    P95 CAGR : {p95 * 100:.1f}%   (best 5% of outcomes)")
+    print(f"    P(CAGR>0) : {prob_positive:.0f}%   P(CAGR>5%) : {prob_above5:.0f}%")
+    print()
+
+    # ── DCA stress test ───────────────────────────────────────────────────────
+    # Same two-phase scenario but with ongoing monthly contributions: lower average
+    # cost basis during a lost decade improves ROIC relative to lump-sum.
+    if monthly_contribution > 0:
+        annual_C = monthly_contribution * 12.0
+        total_invested = initial_stock + annual_C * horizon_years
+
+        # Simulate portfolio year-by-year; contributions arrive monthly, so use
+        # the annuity FV formula for each year's cash flows.
+        rng2 = np.random.default_rng(43)
+        r1_dca = np.maximum(
+            rng2.normal(phase1_mean, phase1_std, (n_simulations, phase1_yrs)), -0.99
+        )
+        r2_dca = (
+            np.maximum(
+                rng2.normal(phase2_mean, phase2_std, (n_simulations, phase2_yrs)), -0.99
+            )
+            if phase2_yrs > 0
+            else np.empty((n_simulations, 0))
+        )
+        all_r = np.concatenate([r1_dca, r2_dca], axis=1)  # (n_sim, horizon_years)
+
+        portfolio = np.full(n_simulations, initial_stock, dtype=float)
+        for yr in range(horizon_years):
+            annual_r = all_r[:, yr]
+            # Monthly rate for annuity factor; guard against near-zero annual return
+            monthly_r = (1.0 + annual_r) ** (1.0 / 12) - 1.0
+            safe = np.abs(monthly_r) > 1e-9
+            annuity_fv = np.where(
+                safe,
+                monthly_contribution * ((1.0 + monthly_r) ** 12 - 1.0) / monthly_r,
+                annual_C,
+            )
+            portfolio = portfolio * (1.0 + annual_r) + annuity_fv
+
+        # ROIC: annualised return on all capital deployed (initial + contributions)
+        roic = (portfolio / total_invested) ** (1.0 / horizon_years) - 1.0
+
+        rp5, rp25, rp50, rp75, rp95 = (
+            float(np.percentile(roic, p)) for p in (5, 25, 50, 75, 95)
+        )
+        fp5, fp25, fp50, fp75, fp95 = (
+            float(np.percentile(portfolio / 1e3, p)) for p in (5, 25, 50, 75, 95)
+        )
+        prob_roic_pos  = float(np.mean(roic > 0))   * 100
+        prob_roic_5pct = float(np.mean(roic > 0.05)) * 100
+
+        print("  DCA stress test  (same two-phase scenario + monthly contributions):")
+        print(f"    Initial stock portfolio : €{initial_stock:>10,.0f}")
+        print(f"    Monthly contribution    : €{monthly_contribution:>10,.0f}")
+        print(f"    Total invested (horizon): €{total_invested:>10,.0f}")
+        print(f"    {'─' * 50}")
+        print(f"    {'':20}  {'ROIC (ann.)':>11}   {'Final portfolio (k€)':>20}")
+        print(f"    {'P5  (worst 5%)':20}  {rp5*100:>10.1f}%   {fp5:>20.0f}")
+        print(f"    {'P25':20}  {rp25*100:>10.1f}%   {fp25:>20.0f}")
+        print(f"    {'P50  (median)':20}  {rp50*100:>10.1f}%   {fp50:>20.0f}")
+        print(f"    {'P75':20}  {rp75*100:>10.1f}%   {fp75:>20.0f}")
+        print(f"    {'P95  (best 5%)':20}  {rp95*100:>10.1f}%   {fp95:>20.0f}")
+        print(f"    {'─' * 50}")
+        print(f"    P(ROIC>0) : {prob_roic_pos:.0f}%   P(ROIC>5%) : {prob_roic_5pct:.0f}%")
+        print(f"    vs lump-sum P50 CAGR: {p50*100:.1f}%  →  DCA P50 ROIC: {rp50*100:.1f}%"
+              f"  (Δ={( rp50-p50)*100:+.1f}pp)")
+        print()
+
+
+def _decum_sim(
+    stock_r: np.ndarray,
+    bond_r: np.ndarray,
+    infl_r: np.ndarray,
+    initial_stock: float,
+    initial_bond: float,
+    initial_monthly_wd: float,
+    n_years: int,
+    bond_tax: float,
+    pension_monthly: float,
+    pension_start_yr: int,
+    pension_adj: float,
+    stock_pct_start: float,
+    glide_end_pct: float,
+    glide_yrs: int,
+) -> tuple[float, int | None, dict[int, np.ndarray]]:
+    """Vectorised decumulation loop. Returns (survival_rate, median_ruin_year, portfolio_at_key_years)."""
+    n_sims = stock_r.shape[0]
+    stock_v    = np.full(n_sims, initial_stock)
+    bond_v     = np.full(n_sims, initial_bond)
+    alive      = np.ones(n_sims, dtype=bool)
+    cum_inf    = np.ones(n_sims)
+    ruin_years = np.full(n_sims, -1, dtype=int)
+    target_annual_nom = initial_monthly_wd * 12.0
+    portfolio_at: dict[int, np.ndarray] = {}
+    _glide = glide_yrs > 0 and abs(glide_end_pct - stock_pct_start) > 1e-6
+
+    for year in range(n_years):
+        stock_v     = stock_v * (1.0 + stock_r[:, year])
+        bond_coupon = bond_v * bond_r[:, year] * (1.0 - bond_tax)
+        cum_inf     = cum_inf * (1.0 + infl_r[:, year])
+
+        if _glide:
+            progress = min(year + 1, glide_yrs) / glide_yrs
+            tgt_frac = stock_pct_start + (glide_end_pct - stock_pct_start) * progress
+            total_v  = stock_v + bond_v
+            mask     = alive & (total_v > 0.0)
+            stock_v  = np.where(mask, total_v * tgt_frac, stock_v)
+            bond_v   = np.where(mask, total_v * (1.0 - tgt_frac), bond_v)
+
+        pension_inc = (
+            pension_monthly * 12.0 * (1.0 + pension_adj) ** (year - pension_start_yr)
+            if year >= pension_start_yr else 0.0
+        )
+        target   = target_annual_nom * cum_inf
+        passive  = bond_coupon + pension_inc
+        residual = np.maximum(0.0, target - passive)
+        surplus  = np.maximum(0.0, passive - target)
+
+        stock_v   = stock_v - np.where(alive, residual, 0.0) + np.where(alive, surplus, 0.0)
+        shortfall = np.maximum(0.0, -stock_v)
+        stock_v   = np.maximum(stock_v, 0.0)
+        bond_v    = np.maximum(bond_v - np.where(alive, shortfall, 0.0), 0.0)
+
+        total_v    = stock_v + bond_v
+        newly_dead = alive & (total_v <= 0.0)
+        ruin_years = np.where(newly_dead, year + 1, ruin_years)
+        alive      = alive & (total_v > 0.0)
+
+        if (year + 1) in (10, 20, 30, 40):
+            portfolio_at[year + 1] = total_v.copy()
+
+    failed   = ruin_years > 0
+    ruin_med = int(np.median(ruin_years[failed])) if np.any(failed) else None
+    return float(np.mean(alive)), ruin_med, portfolio_at
+
+
+def print_sorr_stress_test(
+    benchmark_data: list,
+    cfg_raw: dict,
+    n_simulations: int = 20_000,
+) -> tuple[float | None, float | None]:
+    """SORR stress test: lost decade starts on retirement day.
+    Returns (stress_survival, baseline_survival) for use in plan verdict."""
+    sp500 = next((p for t, p, _, _ in benchmark_data if t == "^GSPC"), None)
+    if sp500 is None:
+        return None, None
+    lost = _era_stats(sp500, "2000-01-01", "2010-01-01")
+    rec  = _era_stats(sp500, "2009-01-01", None)
+    if lost["cagr"] is None or rec["cagr"] is None:
+        return None, None
+
+    horizon_yrs      = int(cfg_raw.get("years", 15))
+    inflation        = float(cfg_raw.get("expected_inflation_percent", 2.3)) / 100
+    target_monthly   = float(cfg_raw.get("target_monthly_retirement_income", 3300.0))
+    withdrawal_rate  = float(cfg_raw.get("withdrawal_percentage_stock", 2.8)) / 100
+    bonds_pct        = float(cfg_raw.get("bonds_percentage", 50.0)) / 100
+    stock_pct        = 1.0 - bonds_pct
+    yield_bonds      = float(cfg_raw.get("yield_bonds", 3.4)) / 100
+    bond_tax         = float(cfg_raw.get("tax_rate_bond_italy", 0.125))
+    pension_monthly  = float(cfg_raw.get("mc_decumulation_pension_monthly", 0.0))
+    pension_start_yr = int(cfg_raw.get("mc_decumulation_pension_start_year", 15))
+    pension_adj      = float(cfg_raw.get("mc_decumulation_pension_adjustment_rate", 0.0))
+    n_years          = int(cfg_raw.get("mc_decumulation_years", 40))
+    glide_end_pct    = float(cfg_raw.get("mc_decumulation_glide_end_pct", 0.30))
+    glide_yrs        = int(cfg_raw.get("mc_decumulation_glide_years", 20))
+    stock_cagr       = float(cfg_raw.get("expected_yearly_growth_stocks_percent", 6.0)) / 100
+    stock_std        = float(cfg_raw.get("mc_stock_return_std_percent", 15.0)) / 100
+
+    # Nominal target at retirement
+    target_monthly_nom = target_monthly * (1.0 + inflation) ** horizon_yrs
+    target_annual_nom  = target_monthly_nom * 12.0
+
+    # Required portfolio: bond income + stock withdrawal = target_annual
+    combined_rate     = stock_pct * withdrawal_rate + bonds_pct * yield_bonds * (1.0 - bond_tax)
+    initial_portfolio = target_annual_nom / combined_rate
+    init_stock        = initial_portfolio * stock_pct
+    init_bond         = initial_portfolio * bonds_pct
+
+    # Two-phase stress return distribution (geom → arith)
+    phase1_mean = lost["cagr"] + 0.5 * lost["vol"] ** 2
+    phase2_mean = rec["cagr"]  + 0.5 * rec["vol"]  ** 2
+    phase1_std  = lost["vol"]
+    phase2_std  = rec["vol"]
+    phase1_yrs  = min(10, n_years)
+    phase2_yrs  = max(0, n_years - phase1_yrs)
+
+    # Baseline: config CAGR (geom → arith)
+    base_mean = stock_cagr + 0.5 * stock_std ** 2
+
+    rng = np.random.default_rng(44)
+
+    def _make_returns(means_stds: list[tuple[float, float, int]]) -> np.ndarray:
+        parts = [
+            np.maximum(rng.normal(m, s, (n_simulations, y)), -0.99)
+            for m, s, y in means_stds if y > 0
+        ]
+        return np.concatenate(parts, axis=1)
+
+    infl_r = np.maximum(rng.normal(inflation, 0.01, (n_simulations, n_years)), 0.0)
+    bond_r = np.maximum(rng.normal(yield_bonds, 0.005, (n_simulations, n_years)), 0.0)
+
+    stress_stock_r   = _make_returns([(phase1_mean, phase1_std, phase1_yrs),
+                                      (phase2_mean, phase2_std, phase2_yrs)])
+    baseline_stock_r = _make_returns([(base_mean, stock_std, n_years)])
+
+    common = dict(
+        bond_r=bond_r, infl_r=infl_r,
+        initial_stock=init_stock, initial_bond=init_bond,
+        initial_monthly_wd=target_monthly_nom,
+        n_years=n_years, bond_tax=bond_tax,
+        pension_monthly=pension_monthly, pension_start_yr=pension_start_yr,
+        pension_adj=pension_adj, stock_pct_start=stock_pct,
+        glide_end_pct=glide_end_pct, glide_yrs=glide_yrs,
+    )
+    stress_surv,   stress_ruin_yr,   stress_pf   = _decum_sim(stress_stock_r,   **common)
+    baseline_surv, baseline_ruin_yr, baseline_pf = _decum_sim(baseline_stock_r, **common)
+
+    W = 70
+    print(f"{'SORR STRESS TEST — LOST DECADE STARTS AT RETIREMENT':^{W}}")
+    print(f"  Worst case: you retire into 2000-2009 conditions, followed by a recovery.")
+    print(f"    Phase 1 — {phase1_yrs:2d}yr lost decade : "
+          f"mean={phase1_mean*100:+.1f}%  σ={phase1_std*100:.1f}%  ({lost['yr_from']}–{lost['yr_to']})")
+    if phase2_yrs > 0:
+        print(f"    Phase 2 — {phase2_yrs:2d}yr recovery    : "
+              f"mean={phase2_mean*100:+.1f}%  σ={phase2_std*100:.1f}%  ({rec['yr_from']}–{rec['yr_to']})")
+    print()
+    print(f"    Reference retirement portfolio : €{initial_portfolio:>10,.0f}")
+    print(f"    Stock ({stock_pct*100:.0f}%)  :  €{init_stock:>10,.0f}  "
+          f"→ {withdrawal_rate*100:.1f}% withdrawal = €{init_stock*withdrawal_rate/12:,.0f}/mo")
+    print(f"    Bonds ({bonds_pct*100:.0f}%)  :  €{init_bond:>10,.0f}  "
+          f"→ {yield_bonds*(1-bond_tax)*100:.2f}% net yield = €{init_bond*yield_bonds*(1-bond_tax)/12:,.0f}/mo")
+    print(f"    Monthly withdrawal target (nominal) : €{target_monthly_nom:,.0f}")
+    print(f"    Pension from year {pension_start_yr}  :  €{pension_monthly:,.0f}/mo")
+    print(f"    Decumulation horizon : {n_years}yr  |  {n_simulations:,} simulations")
+    print()
+    print(f"    {'':22}  {'Stress (lost decade)':>21}  {'Baseline (config)':>18}")
+    print(f"    {'─' * 64}")
+    print(f"    {'Survival rate (' + str(n_years) + 'yr)':22}  "
+          f"  {stress_surv*100:>18.1f}%  {baseline_surv*100:>16.1f}%")
+    if stress_ruin_yr:
+        print(f"    {'Median ruin year':22}  {'year ' + str(stress_ruin_yr) + ' of retirement':>21}  "
+              f"{'—' if not baseline_ruin_yr else 'year ' + str(baseline_ruin_yr):>18}")
+    print()
+    print(f"    Portfolio value P5 / P50 / P95  (k€, all paths):")
+    print(f"    {'Year':>6}  {'Stress P5':>10}  {'Stress P50':>11}  {'Stress P95':>11}  "
+          f"{'Base P50':>10}")
+    for yr in sorted(set(stress_pf) & set(baseline_pf)):
+        if yr <= n_years:
+            sp5, sp50, sp95 = (np.percentile(stress_pf[yr], p) / 1e3 for p in (5, 50, 95))
+            bp50 = np.percentile(baseline_pf[yr], 50) / 1e3
+            print(f"    {yr:>6}  {sp5:>10.0f}  {sp50:>11.0f}  {sp95:>11.0f}  {bp50:>10.0f}")
+    print()
+
+    return stress_surv, baseline_surv
+
+
+def print_plan_verdict(
+    cfg_raw: dict,
+    cape_ratio: float | None = None,
+    cape_long_run_mean: float = 17.0,
+    cape_eps_growth: float = 0.015,
+    sorr_stress_survival: float | None = None,
+    sorr_baseline_survival: float | None = None,
+    joint_survival_rate: float | None = None,
+) -> None:
+    """Single-page synthesis: current position, target, gap, verdict, top risks."""
+    horizon_yrs     = int(cfg_raw.get("years", 15))
+    inflation       = float(cfg_raw.get("expected_inflation_percent", 2.3)) / 100
+    target_monthly  = float(cfg_raw.get("target_monthly_retirement_income", 3300.0))
+    withdrawal_rate = float(cfg_raw.get("withdrawal_percentage_stock", 2.8)) / 100
+    bonds_pct       = float(cfg_raw.get("bonds_percentage", 50.0)) / 100
+    stock_pct       = 1.0 - bonds_pct
+    yield_bonds     = float(cfg_raw.get("yield_bonds", 3.4)) / 100
+    bond_tax        = float(cfg_raw.get("tax_rate_bond_italy", 0.125))
+    stock_cagr      = float(cfg_raw.get("expected_yearly_growth_stocks_percent", 6.0)) / 100
+    stocks          = float(cfg_raw.get("current_stock_value", 0.0))
+    bonds_val       = float(cfg_raw.get("current_bonds_value", 0.0))
+    cash            = float(cfg_raw.get("current_cash", 0.0))
+    reserve         = float(cfg_raw.get("cash_reserve_at_horizon", 0.0))
+    annual_saving   = float(cfg_raw.get("annual_net_saving", 0.0))
+
+    deployable       = cash - reserve
+    total_assets     = stocks + bonds_val + cash
+    total_investable = stocks + bonds_val + deployable
+
+    # CAPE-implied stock CAGR
+    cape_stock_cagr: float | None = None
+    if cape_ratio and cape_ratio > 0:
+        ey        = 1.0 / cape_ratio
+        reversion = (cape_long_run_mean / cape_ratio) ** (1.0 / horizon_yrs) - 1.0
+        real_cagr = ey + cape_eps_growth + reversion
+        cape_stock_cagr = (1.0 + real_cagr) * (1.0 + inflation) - 1.0
+
+    # Required retirement portfolio
+    infl_factor       = (1.0 + inflation) ** horizon_yrs
+    target_annual_nom = target_monthly * 12.0 * infl_factor
+    combined_rate     = stock_pct * withdrawal_rate + bonds_pct * yield_bonds * (1.0 - bond_tax)
+    required_portfolio = target_annual_nom / combined_rate
+
+    # Projection: FV of current investable + FV of annual savings, blended CAGR
+    def _project(s_cagr: float) -> float:
+        blended = stock_pct * s_cagr + bonds_pct * yield_bonds
+        fv_assets  = total_investable * (1.0 + blended) ** horizon_yrs
+        fv_savings = (
+            annual_saving * ((1.0 + blended) ** horizon_yrs - 1.0) / blended
+            if blended > 1e-9 else annual_saving * horizon_yrs
+        )
+        return fv_assets + fv_savings
+
+    proj_base = _project(stock_cagr)
+    proj_cape = _project(cape_stock_cagr) if cape_stock_cagr is not None else None
+
+    W = 70
+    print(f"{'PLAN VERDICT':^{W}}")
+    print()
+
+    # Current assets
+    print(f"  Current assets")
+    print(f"    Stocks                 :  €{stocks:>10,.0f}")
+    print(f"    Bonds                  :  €{bonds_val:>10,.0f}")
+    print(f"    Cash                   :  €{cash:>10,.0f}  (€{reserve:,.0f} kept as reserve)")
+    print(f"    {'─' * 42}")
+    print(f"    Total                  :  €{total_assets:>10,.0f}")
+    print(f"    Investable (excl. res.):  €{total_investable:>10,.0f}")
+    print(f"    Annual saving          :  €{annual_saving:>10,.0f}  (€{annual_saving/12:,.0f}/mo)")
+    print()
+
+    # Target
+    print(f"  Retirement target  (horizon {horizon_yrs}yr  |  inflation {inflation*100:.1f}%/yr)")
+    print(f"    Monthly income today         :  €{target_monthly:>8,.0f}")
+    print(f"    Monthly income nominal       :  €{target_monthly * infl_factor:>8,.0f}")
+    print(f"    Required portfolio           :  €{required_portfolio:>10,.0f}")
+    print(f"      ({stock_pct*100:.0f}% stocks @ {withdrawal_rate*100:.1f}% SWR  +  "
+          f"{bonds_pct*100:.0f}% bonds @ {yield_bonds*(1-bond_tax)*100:.2f}% net)")
+    print()
+
+    # Projections
+    blended_base = stock_pct * stock_cagr + bonds_pct * yield_bonds
+    print(f"  Projected portfolio at horizon  (blended CAGR = {blended_base*100:.1f}%)")
+    gap_base = proj_base - required_portfolio
+    sign_b   = "+" if gap_base >= 0 else "−"
+    print(f"    Config  ({stock_cagr*100:.1f}% stock CAGR)  →  "
+          f"€{proj_base:>10,.0f}   gap {sign_b}€{abs(gap_base):,.0f}")
+    if proj_cape is not None:
+        blended_cape = stock_pct * cape_stock_cagr + bonds_pct * yield_bonds
+        gap_cape = proj_cape - required_portfolio
+        sign_c   = "+" if gap_cape >= 0 else "−"
+        print(f"    CAPE    ({cape_stock_cagr*100:.1f}% stock CAGR)  →  "
+              f"€{proj_cape:>10,.0f}   gap {sign_c}€{abs(gap_cape):,.0f}")
+    print()
+
+    # Verdict
+    print(f"  {'─' * 56}")
+    if gap_base >= 0:
+        margin = gap_base / required_portfolio * 100
+        print(f"  VERDICT  ✓  ON TRACK")
+        print(f"    Projected surplus {margin:.0f}% above target at config CAGR ({stock_cagr*100:.1f}%).")
+        if proj_cape is not None and gap_cape >= 0:
+            print(f"    Remains in surplus even at CAPE-implied returns ({cape_stock_cagr*100:.1f}%).")
+        elif proj_cape is not None:
+            extra_mo = abs(gap_cape) * withdrawal_rate / 12
+            print(f"    ⚠ Under CAPE scenario: shortfall €{abs(gap_cape):,.0f}"
+                  f" (≈ €{extra_mo:,.0f}/mo extra contribution needed).")
+    else:
+        extra_mo = abs(gap_base) * withdrawal_rate / 12
+        print(f"  VERDICT  ✗  SHORTFALL EXPECTED")
+        print(f"    Gap of €{abs(gap_base):,.0f} at config CAGR."
+              f"  Close it with ≈ €{extra_mo:,.0f}/mo extra contribution.")
+    if joint_survival_rate is not None:
+        print(f"    Joint P(accumulate AND survive 40 yr) : {joint_survival_rate*100:.1f}%"
+              f"  (chained MC — no independence assumption)")
+    print()
+
+    # Top risks
+    print(f"  Top risks:")
+    risk_n = 1
+    if cape_ratio and cape_stock_cagr is not None:
+        print(f"    {risk_n}. Valuation (CAPE {cape_ratio:.0f}): stock forward CAGR may be "
+              f"{cape_stock_cagr*100:.1f}% vs {stock_cagr*100:.1f}% in plan.")
+        risk_n += 1
+    if sorr_stress_survival is not None:
+        delta = (sorr_baseline_survival or 1.0) - sorr_stress_survival
+        print(f"    {risk_n}. SORR: a lost decade starting at retirement cuts survival from "
+              f"{(sorr_baseline_survival or 1)*100:.0f}% to {sorr_stress_survival*100:.0f}%"
+              f" (−{delta*100:.0f}pp). See SORR section above.")
+        risk_n += 1
+    extra_infl = target_monthly * 12.0 * horizon_yrs * 0.01
+    print(f"    {risk_n}. Inflation: each +1pp above {inflation*100:.1f}%/yr adds"
+          f" ≈ €{extra_infl:,.0f} to the total retirement cost.")
+    print()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     import argparse
-    parser = argparse.ArgumentParser(description="ETF CAGR analysis")
+    parser = argparse.ArgumentParser(
+        description="ETF CAGR analysis",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "analyses:\n"
+            "  cagr       ETF rolling CAGR summary + key metrics\n"
+            "  optimizer  portfolio optimiser + cardinality sweep + final summary\n"
+            "  benchmark  benchmark index rolling CAGR + era analysis\n"
+            "  forward    CAPE-implied CAGR + two-phase MC stress test + DCA\n"
+            "  full       all of the above  (default)\n"
+        ),
+    )
+    parser.add_argument(
+        "analysis", nargs="?", default="full",
+        choices=["cagr", "optimizer", "benchmark", "forward", "full"],
+        help="which analysis to run (default: full)",
+    )
     parser.add_argument("--verbose", "-v", action="store_true",
-                        help="print rolling CAGR tables and notes")
-    args, _ = parser.parse_known_args()
-    verbose = args.verbose
+                        help="print detailed tables (rolling windows, correlation, optimiser weights)")
+    parser.add_argument("--agent", action="store_true",
+                        help="print AI agent key observations and metric guide")
+    parser.add_argument("--no-advanced-optimization", action="store_false", dest="advanced_opt",
+                        help="disable Bayesian shrinkage (OAS covariance + James-Stein means) in optimizer")
+    parser.add_argument("--no-clear", action="store_true",
+                        help="suppress terminal clear (used when called from main.py)")
+    parser.set_defaults(advanced_opt=True)
+    args = parser.parse_args()
+    verbose  = args.verbose
+    agent    = args.agent
+    analysis = args.analysis
+    advanced_opt = args.advanced_opt
 
-    os.system("cls" if os.name == "nt" else "clear")
+    run_cagr      = analysis in ("cagr", "optimizer", "full")
+    run_optimizer = analysis in ("optimizer", "full")
+    run_benchmark = analysis in ("benchmark", "forward", "full")
+    run_forward   = analysis in ("forward", "full")
 
-    print("=" * 70)
-    print(f"{'ETF CAGR ANALYSIS  —  ROLLING DAILY WINDOWS  (EUR-adjusted)':^70}")
-    print("=" * 70)
+    if not args.no_clear:
+        os.system("cls" if os.name == "nt" else "clear")
+
+    print(f"{'SINGLE ETF CAGR ANALYSIS  —  ROLLING DAILY WINDOWS  (EUR-adjusted)':^70}")
     if verbose:
         print(f"  Instruments: {len(TICKERS)} total  ({len(EU_TICKERS)} EU-eligible ✓, {len(US_TICKERS)} US-listed)")
         print(f"  Windows    : {', '.join(_window_label(y) for y in WINDOW_YEARS)}")
@@ -1588,7 +2285,46 @@ def main() -> None:
         print(f"  EU flag ✓  : UCITS ETF directly purchasable under MiFID II")
     print()
 
-    # Fetch FX rates
+    # ── Load config ───────────────────────────────────────────────────────────
+    shrink_mean_intensity: float = 0.5  # default; overwritten from config if loaded
+    try:
+        import tomllib
+        with open("config.toml", "rb") as _f:
+            _raw_cfg = tomllib.load(_f)
+        cfg_raw: dict                     = _raw_cfg
+        benchmark_tickers: list[str]      = _raw_cfg.get("benchmark_index", [])
+        benchmark_start_year: int | None  = _raw_cfg.get("benchmark_start_year", None)
+        benchmark_era_horizon_year: int | None = _raw_cfg.get("benchmark_era_horizon_year", None)
+        cape_ratio: float | None          = _raw_cfg.get("cape_ratio", None)
+        cape_long_run_mean: float         = float(_raw_cfg.get("cape_long_run_mean", 17.0))
+        cape_eps_growth: float            = float(_raw_cfg.get("cape_eps_growth", 0.015))
+        cape_n_simulations: int           = int(_raw_cfg.get("cape_n_simulations", 50_000))
+        horizon_years: int                = int(_raw_cfg.get("years", 15))
+        inflation: float                  = float(_raw_cfg.get("expected_inflation_percent", 2.3)) / 100
+        _initial_stock: float             = float(_raw_cfg.get("current_stock_value", 0.0))
+        _annual_saving: float             = float(_raw_cfg.get("annual_net_saving", 0.0))
+        _stock_pct: float                 = float(_raw_cfg.get("maximum_stock_monthly_investment_pct", 0.0))
+        dca_monthly: float                = (_annual_saving / 12.0) * _stock_pct
+        opt_cfg: dict                     = _raw_cfg.get("etf_optimizer", {})
+        optimize_tickers: list[str]       = opt_cfg.get("optimize_tickers", [])
+        shrink_mean_intensity: float      = float(opt_cfg.get("bayesian_shrink_mean", 0.5))
+    except Exception:
+        benchmark_tickers      = []
+        benchmark_start_year   = None
+        benchmark_era_horizon_year = None
+        cape_ratio             = None
+        cape_long_run_mean     = 17.0
+        cape_eps_growth        = 0.015
+        cape_n_simulations     = 50_000
+        horizon_years          = 15
+        inflation              = 0.023
+        _initial_stock         = 0.0
+        dca_monthly            = 0.0
+        opt_cfg                = {}
+        optimize_tickers       = []
+        cfg_raw                = {}
+
+    # ── Fetch FX rates (always needed for EUR conversion) ─────────────────────
     if verbose:
         print("  Fetching FX rate series...")
     fx_cache: dict[str, pd.Series | None] = {}
@@ -1602,158 +2338,127 @@ def main() -> None:
             else:
                 print(f"  {fx_ticker}  [failed]")
 
-    # Fetch benchmark index series (cached separately from ETFs)
-    try:
-        import tomllib
-        with open("config.toml", "rb") as _f:
-            _raw_cfg = tomllib.load(_f)
-        benchmark_tickers: list[str] = _raw_cfg.get("benchmark_index", [])
-        benchmark_start_year: int | None = _raw_cfg.get("benchmark_start_year", None)
-    except Exception:
-        benchmark_tickers = []
-        benchmark_start_year = None
-
-    benchmark_prices: dict[str, pd.Series] = {}
-    if benchmark_tickers:
-        print(f"  Fetching {len(benchmark_tickers)} benchmark indices…",
-              end="" if not verbose else "\n", flush=True)
-        bfailed: list[str] = []
-        for bticker in benchmark_tickers:
-            prices_b, bstatus, bccy = fetch_benchmark_series(bticker)
-            if prices_b is not None:
-                benchmark_prices[bticker] = (prices_b, bccy)
-                if verbose:
-                    print(f"  {bticker}  [{bstatus}]  "
-                          f"{prices_b.index[0].year}–{prices_b.index[-1].year}  "
-                          f"({len(prices_b):,} days)  [{bccy}]")
-            else:
-                bfailed.append(bticker)
-        if not verbose:
-            ok_b = len(benchmark_prices)
-            fail_b = f"  {len(bfailed)} failed: {', '.join(bfailed)}" if bfailed else ""
-            print(f"  {ok_b} ok{fail_b}")
-
-    # Fetch ETF price series
-    print(f"  Fetching {len(TICKERS)} tickers…", end="" if not verbose else "\n", flush=True)
+    # ── Fetch ETF price series (cagr / optimizer) ─────────────────────────────
     results: list[TickerResult] = []
     prices_eur: dict[str, pd.Series] = {}
-    failed: list[str] = []
-    for ticker in TICKERS:
-        eu = ticker in EU_TICKERS
+
+    if run_cagr or run_optimizer:
+        print(f"  Fetching {len(TICKERS)} tickers…", end="" if not verbose else "\n", flush=True)
+        failed: list[str] = []
+        for ticker in TICKERS:
+            eu = ticker in EU_TICKERS
+            if verbose:
+                print(f"  → {ticker}", end="", flush=True)
+            result, cache_status, eur_prices = fetch_and_compute(ticker, fx_cache, eu)
+            if result is not None:
+                if verbose:
+                    orig = result.currency_original
+                    fx_note = "" if orig == "EUR" else f" [{orig}→EUR]"
+                    print(f"  ✓  [{cache_status}]  {result.data_from} → {result.data_to}{fx_note}")
+                results.append(result)
+                prices_eur[ticker] = eur_prices
+            else:
+                failed.append(ticker)
+                if verbose:
+                    print(f"  ✗  [{cache_status}]")
+        ok_count = len(results)
+        fail_str = f"  {len(failed)} failed: {', '.join(failed)}" if failed else ""
+        if not verbose:
+            print(f"  {ok_count} ok{fail_str}")
+
+        if not results:
+            print("\n  No data retrieved.")
+            return
+
+    # ── Fetch benchmark index series (benchmark / forward) ────────────────────
+    benchmark_prices: dict[str, tuple] = {}
+
+    if run_benchmark or run_forward:
+        if benchmark_tickers:
+            print(f"  Fetching {len(benchmark_tickers)} benchmark indices…",
+                  end="" if not verbose else "\n", flush=True)
+            bfailed: list[str] = []
+            for bticker in benchmark_tickers:
+                prices_b, bstatus, bccy = fetch_benchmark_series(bticker)
+                if prices_b is not None:
+                    benchmark_prices[bticker] = (prices_b, bccy)
+                    if verbose:
+                        print(f"  {bticker}  [{bstatus}]  "
+                              f"{prices_b.index[0].year}–{prices_b.index[-1].year}  "
+                              f"({len(prices_b):,} days)  [{bccy}]")
+                else:
+                    bfailed.append(bticker)
+            if not verbose:
+                ok_b = len(benchmark_prices)
+                fail_b = f"  {len(bfailed)} failed: {', '.join(bfailed)}" if bfailed else ""
+                print(f"  {ok_b} ok{fail_b}")
+
+    # ── CAGR analysis ─────────────────────────────────────────────────────────
+    if run_cagr and results:
+        ref_label = _window_label(SORT_BY_WINDOW)
+
         if verbose:
-            print(f"  → {ticker}", end="", flush=True)
-        result, cache_status, eur_prices = fetch_and_compute(ticker, fx_cache, eu)
-        if result is not None:
-            if verbose:
-                orig = result.currency_original
-                fx_note = "" if orig == "EUR" else f" [{orig}→EUR]"
-                print(f"  ✓  [{cache_status}]  {result.data_from} → {result.data_to}{fx_note}")
-            results.append(result)
-            prices_eur[ticker] = eur_prices
-        else:
-            failed.append(ticker)
-            if verbose:
-                print(f"  ✗  [{cache_status}]")
+            print()
+            print(f"{'SUMMARY — MEAN ROLLING CAGR BY WINDOW  (all prices in EUR)':^70}")
+            print(f"  Sorted by {ref_label} mean CAGR  |  Min/Max = worst/best {ref_label} period ever")
+            print(f"  EU✓ = UCITS ETF available to EU retail investors\n")
+            print_summary_table(results)
 
-    ok_count = len(results)
-    fail_str = f"  {len(failed)} failed: {', '.join(failed)}" if failed else ""
-    if not verbose:
-        print(f"  {ok_count} ok{fail_str}")
-
-    if not results:
-        print("\n  No data retrieved.")
-        return
-
-    ref_label = _window_label(SORT_BY_WINDOW)
-
-    # Verbose-only: rolling CAGR tables
-    if verbose:
-        print()
-        print("=" * 70)
-        print(f"{'SUMMARY — MEAN ROLLING CAGR BY WINDOW  (all prices in EUR)':^70}")
-        print("=" * 70)
-        print(f"  Sorted by {ref_label} mean CAGR  |  Min/Max = worst/best {ref_label} period ever")
-        print(f"  EU✓ = UCITS ETF available to EU retail investors\n")
-        print_summary_table(results)
+            print()
+            print(f"{'DETAIL — RANKED BY MEAN CAGR PER WINDOW':^70}")
+            print("  Min = worst N-year period | Max = best | Ann.σ = daily vol (EUR)")
+            for years in WINDOW_YEARS:
+                print_detail_table(results, years)
 
         print()
-        print("=" * 70)
-        print(f"{'DETAIL — RANKED BY MEAN CAGR PER WINDOW':^70}")
-        print("=" * 70)
-        print("  Min = worst N-year period | Max = best | Ann.σ = daily vol (EUR)")
-        for years in WINDOW_YEARS:
-            print_detail_table(results, years)
+        print(f"{'FINAL SUMMARY — KEY METRICS AT A GLANCE':^70}")
+        print(f"  Ranked by {ref_label} mean CAGR  |  Cons. = mean÷std (timing consistency)\n")
+        print_final_summary(results)
 
-    # Always: final summary
-    print()
-    print("=" * 70)
-    print(f"{'FINAL SUMMARY — KEY METRICS AT A GLANCE':^70}")
-    print("=" * 70)
-    print(f"  Ranked by {ref_label} mean CAGR  |  Cons. = mean÷std (timing consistency)\n")
-    print_final_summary(results)
+        if agent:
+            print()
+            print_analysis_notes(results)
 
-    # Verbose-only: notes
-    if verbose:
-        print()
-        print("=" * 70)
-        print(f"{'NOTES':^70}")
-        print("=" * 70)
-        print("  Std CAGR: std dev of rolling N-year CAGRs across all daily start dates.")
-        print("            Measures entry-point timing risk: how much the N-year outcome")
-        print("            varies depending on when you started. Low std = consistent.")
-        print()
-        print("  P5/P25  : 5th and 25th percentile of rolling CAGRs. P5 is the conservative")
-        print("            planning input — 95% of all entry dates beat this return.")
-        print("            More robust than Min (which can be a single outlier period).")
-        print()
-        print("  MDD     : max peak-to-trough drawdown in EUR. E.g. -55% means the ETF")
-        print("            lost 55% from its high at worst. Key input for SORR assessment.")
-        print()
-        print("  σ-5y / σ-10y / σ-all: annualised daily log-return vol over last 5 years,")
-        print("            last 10 years, and full available history. σ-5y feeds Monte Carlo.")
-        print()
-        print("  EUR pricing: UCITS ETFs (.DE/.AS) are NAV-priced in EUR — price already")
-        print("  embeds EUR/USD. US ETFs converted via EURUSD=X / GBPEUR=X historical rates.")
-        print()
-        print("  MiFID II / PRIIPs: EU retail investors cannot buy US-domiciled ETFs")
-        print("  (SPY, QQQ, VTI, VEA, VWO) directly. Shown as benchmarks only.")
-        print()
+        if verbose:
+            print()
+            print(f"{'NOTES':^70}")
+            print("  Std CAGR: std dev of rolling N-year CAGRs across all daily start dates.")
+            print("            Measures entry-point timing risk: how much the N-year outcome")
+            print("            varies depending on when you started. Low std = consistent.")
+            print()
+            print("  P5/P25  : 5th and 25th percentile of rolling CAGRs. P5 is the conservative")
+            print("            planning input — 95% of all entry dates beat this return.")
+            print("            More robust than Min (which can be a single outlier period).")
+            print()
+            print("  MDD     : max peak-to-trough drawdown in EUR. E.g. -55% means the ETF")
+            print("            lost 55% from its high at worst. Key input for SORR assessment.")
+            print()
+            print("  σ-5y / σ-10y / σ-all: annualised daily log-return vol over last 5 years,")
+            print("            last 10 years, and full available history. σ-5y feeds Monte Carlo.")
+            print()
+            print("  EUR pricing: UCITS ETFs (.DE/.AS) are NAV-priced in EUR — price already")
+            print("  embeds EUR/USD. US ETFs converted via EURUSD=X / GBPEUR=X historical rates.")
+            print()
+            print("  MiFID II / PRIIPs: EU retail investors cannot buy US-domiciled ETFs")
+            print("  (SPY, QQQ, VTI, VEA, VWO) directly. Shown as benchmarks only.")
+            print()
 
-    print()
-    print("=" * 70)
-    print(f"{'CORRELATION MATRIX — PAIRWISE PEARSON  (EUR daily log returns)':^70}")
-    print("=" * 70)
-    print("  Lower triangle. 1.00 on diagonal (omitted). Values near 1.0 = redundant.")
-    print()
-    print_correlation_matrix(results, prices_eur)
-
-    # Always: agent summary (captured by main.py pipeline)
-    print()
-    print("=" * 70)
-    print(f"{'AGENT SUMMARY — STRUCTURED FOR AI RECOMMENDATION':^70}")
-    print("=" * 70)
-    print()
-    print_agent_summary(results)
-    print()
+            print()
+            print(f"{'CORRELATION MATRIX — PAIRWISE PEARSON  (EUR daily log returns)':^70}")
+            print("  Values near 1.0 = redundant.")
+            print()
+            print_correlation_matrix(results, prices_eur)
 
     # ── Portfolio optimiser ───────────────────────────────────────────────────
     opt_result: OptimalPortfolioResult | None = None
-    try:
-        import tomllib
-        with open("config.toml", "rb") as _f:
-            _raw = tomllib.load(_f)
-        opt_cfg = _raw.get("etf_optimizer", {})
-        optimize_tickers: list[str] = opt_cfg.get("optimize_tickers", [])
-    except Exception:
-        optimize_tickers = []
-        opt_cfg = {}
+    sweep: list[tuple[int, OptimalPortfolioResult]] | None = None
+    sweep_strategy: str = opt_cfg.get("selected_strategy", "max_sortino")
 
-    if optimize_tickers:
-        print()
-        print("=" * 70)
-        print(f"{'PORTFOLIO OPTIMISER':^70}")
-        print("=" * 70)
-        print()
+    if run_optimizer and results and optimize_tickers:
+        if verbose:
+            print()
+            print(f"{'PORTFOLIO OPTIMISER':^70}")
+            print()
         print("  Running optimisation (15 restarts per strategy)…", flush=True)
         opt_result = compute_optimal_portfolio(
             results=results,
@@ -1765,13 +2470,13 @@ def main() -> None:
             min_weight_threshold=float(opt_cfg.get("min_weight_if_included", 0.05)),
             min_history_years=float(opt_cfg.get("min_history_years", 5.0)),
             selected_strategy=opt_cfg.get("selected_strategy", None),
+            use_bayesian_shrinkage=advanced_opt,
+            shrink_mean_intensity=shrink_mean_intensity,
         )
-        if opt_result:
+        if opt_result and verbose:
             print_optimal_portfolio(opt_result)
 
-        # ── Cardinality sweep ─────────────────────────────────────────────────
         if opt_result and opt_cfg.get("cardinality_sweep", False):
-            sweep_strategy = opt_cfg.get("selected_strategy", "max_sortino")
             max_k = opt_cfg.get("cardinality_sweep_max_k", None)
             n_eligible = len(opt_result.eligible_tickers)
             k_limit = min(n_eligible, int(max_k)) if max_k is not None else n_eligible
@@ -1790,19 +2495,19 @@ def main() -> None:
                 min_history_years=float(opt_cfg.get("min_history_years", 5.0)),
                 strategy_key=sweep_strategy,
                 max_k=k_limit,
+                use_bayesian_shrinkage=advanced_opt,
+                shrink_mean_intensity=shrink_mean_intensity,
             )
-            if sweep:
-                print_cardinality_sweep(sweep, sweep_strategy)
 
-    # ── Benchmark index rolling CAGR tables ──────────────────────────────────
-    if benchmark_prices:
+    # ── Benchmark rolling CAGR + era analysis ────────────────────────────────
+    native_data: list = []
+
+    if run_benchmark and benchmark_prices:
         def _clip(prices: pd.Series) -> pd.Series:
             if benchmark_start_year is None:
                 return prices
             return prices[prices.index >= pd.Timestamp(f"{benchmark_start_year}-01-01")]
 
-        # Table 1: native currency — full history (clipped to benchmark_start_year), no FX truncation
-        native_data = []
         for bticker, (bprices, bccy) in benchmark_prices.items():
             clipped = _clip(bprices)
             if len(clipped) < 2:
@@ -1810,7 +2515,6 @@ def main() -> None:
             rolling = compute_benchmark_rolling(clipped)
             native_data.append((bticker, clipped, bccy, rolling))
 
-        # Table 2: EUR-converted — shows actual EUR investor experience (2003+)
         eur_data = []
         for bticker, (bprices, bccy) in benchmark_prices.items():
             if bccy == "EUR":
@@ -1820,8 +2524,8 @@ def main() -> None:
                 if fx is None:
                     continue
                 prices_eur_b = convert_to_eur(bprices, bccy, fx)
-                prices_eur_b.index = pd.to_datetime(prices_eur_b.index).normalize()
-                prices_eur_b = prices_eur_b[~prices_eur_b.index.duplicated(keep="last")]
+                prices_eur_b.index = pd.to_datetime(prices_eur_b.index).normalize()  # type: ignore[union-attr]
+                prices_eur_b = prices_eur_b[~prices_eur_b.index.duplicated(keep="last")]  # type: ignore[union-attr]
             clipped_eur = _clip(prices_eur_b)
             if len(clipped_eur) < 2:
                 continue
@@ -1838,6 +2542,95 @@ def main() -> None:
             eur_data,
             title="BENCHMARK INDICES — ROLLING CAGR (EUR-converted, 2003+)",
             note="EUR-converted via EURUSD=X. Shows actual EUR investor experience including FX impact.",
+        )
+        print_benchmark_era_table(
+            native_data,
+            era_horizon_year=benchmark_era_horizon_year,
+            horizon_years=horizon_years,
+        )
+
+    # ── Forward CAGR estimates ────────────────────────────────────────────────
+    if run_forward and benchmark_prices:
+        if not native_data:
+            def _clip(prices: pd.Series) -> pd.Series:
+                if benchmark_start_year is None:
+                    return prices
+                return prices[prices.index >= pd.Timestamp(f"{benchmark_start_year}-01-01")]
+            for bticker, (bprices, bccy) in benchmark_prices.items():
+                clipped = _clip(bprices)
+                if len(clipped) < 2:
+                    continue
+                rolling = compute_benchmark_rolling(clipped)
+                native_data.append((bticker, clipped, bccy, rolling))
+
+        print()
+        print_forward_cagr_estimates(
+            native_data,
+            horizon_years=horizon_years,
+            inflation=inflation,
+            cape_ratio=cape_ratio,
+            cape_long_run_mean=cape_long_run_mean,
+            cape_eps_growth=cape_eps_growth,
+            n_simulations=cape_n_simulations,
+            initial_stock=_initial_stock,
+            monthly_contribution=dca_monthly,
+        )
+        print()
+        sorr_stress, sorr_baseline = print_sorr_stress_test(
+            native_data, cfg_raw, n_simulations=cape_n_simulations
+        )
+    else:
+        sorr_stress, sorr_baseline = None, None
+
+    # ── Chained MC for plan verdict ───────────────────────────────────────────
+    joint_survival: float | None = None
+    if run_forward and cfg_raw:
+        try:
+            from models import Config as _Cfg
+            from monte_carlo import compute_chained_mc as _chained_mc
+            _c = _Cfg.from_dict(cfg_raw)
+            _mo_s = _c.annual_net_saving / 12 * _c.maximum_stock_monthly_investment_pct
+            _mo_b = _c.annual_net_saving / 12 * _c.maximum_bonds_monthly_investment_pct
+            _inf = (1 + _c.expected_inflation_percent / 100) ** _c.years
+            _ann = _c.target_monthly_retirement_income * 12 * _inf
+            _sp = 1.0 - _c.bonds_percentage / 100
+            _bp = _c.bonds_percentage / 100
+            _rate = _sp * _c.withdrawal_percentage_stock / 100 + _bp * _c.yield_bonds / 100 * (1 - _c.tax_rate_bond_italy)
+            _req = _ann / _rate
+            joint_survival = _chained_mc(
+                config=_c,
+                monthly_stock_contribution=_mo_s,
+                monthly_bond_contribution=_mo_b,
+                required_portfolio=_req,
+                n_paths=5_000,
+            ).joint_survival_rate
+        except Exception:
+            joint_survival = None
+
+    # ── Final portfolio summary ───────────────────────────────────────────────
+    if opt_result:
+        sp500_prices = next(
+            (prices for t, prices, _, _ in native_data if t == "^GSPC"), None
+        )
+        print()
+        print_portfolio_final_summary(
+            opt_result,
+            strategy_key=sweep_strategy,
+            sweep=sweep,
+            sp500_prices=sp500_prices,
+        )
+
+    # ── Plan verdict ──────────────────────────────────────────────────────────
+    if cfg_raw:
+        print()
+        print_plan_verdict(
+            cfg_raw,
+            cape_ratio=cape_ratio,
+            cape_long_run_mean=cape_long_run_mean,
+            cape_eps_growth=cape_eps_growth,
+            sorr_stress_survival=sorr_stress,
+            sorr_baseline_survival=sorr_baseline,
+            joint_survival_rate=joint_survival,
         )
 
     return results, opt_result

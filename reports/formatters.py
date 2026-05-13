@@ -27,9 +27,7 @@ def clear_terminal() -> None:
 
 def _print_section(number: int, title: str) -> None:
     print("\n")
-    print("=" * 70)
     print(f"  {number}. {title}")
-    print("=" * 70)
     print()
 
 

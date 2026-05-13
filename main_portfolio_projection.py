@@ -24,6 +24,7 @@ from monte_carlo import (
     compute_sensitivity_waterfall,
     compute_stock_allocation_sweep,
     compute_years_to_financial_freedom_mc,
+    compute_years_to_targets_mc,
     run_monte_carlo_simulation,
 )
 from reports import (
@@ -51,7 +52,6 @@ from reports import (
     print_summary_q1,
     print_summary_q2a,
     print_summary_q2b,
-    print_summary_q3,
     print_summary_q4,
 )
 
@@ -165,11 +165,11 @@ def _print_verbose_report(
 
     # ── Section 3: Current Situation & Recommendation ─────────────────────────
     _print_section(3, "CURRENT SITUATION & RECOMMENDATION")
-    print_projection_report(
-        result=projection_result,
-        scenario_de=scenario_1_result,
-        scenario_it=scenario_2_result,
-    )
+    #print_projection_report(
+    #    result=projection_result,
+    #    scenario_de=scenario_1_result,
+    #    scenario_it=scenario_2_result,
+    #)
     print_financial_freedom_report(ff_de, ff_it, config)
     print_projection_yield_table(
         projected_yield_scenario_1,
@@ -348,14 +348,14 @@ def main() -> None:
         stock_std=stock_std, inflation_std=inflation_std,
         fixed_monthly_bonds=bonds_mo_de,
         monthly_stock_contribution=current_stock_mo,
-        target_success=target_success, use_stock_metric=True,
+        target_success=target_success,
     )
     cagr_stock_s2 = compute_required_cagr_for_success(
         config=config, scenario=scenario_2_result,
         stock_std=stock_std, inflation_std=inflation_std,
         fixed_monthly_bonds=bonds_mo_it,
         monthly_stock_contribution=current_stock_mo,
-        target_success=target_success, use_stock_metric=True,
+        target_success=target_success,
     )
 
     grids_de = compute_contribution_cagr_grid(
@@ -418,6 +418,19 @@ def main() -> None:
         stock_teilfreistellung=1.0,
         stock_std=stock_std, inflation_std=inflation_std,
         monthly_stock=current_stock_mo, monthly_bonds=current_bonds_mo,
+        target_success=target_success,
+    )
+
+    years_de = compute_years_to_targets_mc(
+        config=config, scenario=scenario_1_result,
+        monthly_stock=current_stock_mo, monthly_bonds=current_bonds_mo,
+        stock_std=stock_std, inflation_std=inflation_std,
+        target_success=target_success,
+    )
+    years_it = compute_years_to_targets_mc(
+        config=config, scenario=scenario_2_result,
+        monthly_stock=current_stock_mo, monthly_bonds=current_bonds_mo,
+        stock_std=stock_std, inflation_std=inflation_std,
         target_success=target_success,
     )
 
@@ -503,29 +516,26 @@ def main() -> None:
     if args.verbose:
         print(verbose_report, end="")
 
-    # ── Print clean Q0–Q4 summary (always) ───────────────────────────────────
+    # ── Print clean summary (always) ───────────────────────────────────
     summary_buf = io.StringIO()
     with contextlib.redirect_stdout(summary_buf):
         print_summary_q1(config, scenario_1_result, scenario_2_result,
-                         future_monthly_income_value, target_annual_net_income)
-        print_summary_q0(config, projection_result, scenario_1_result, scenario_2_result, mc1, mc2)
-        print("\n\n")
-        print("=" * 70)
-        print("  SENSITIVITY — income success vs each input assumption")
-        print("=" * 70)
-        print()
-        print_sensitivity_waterfall(sensitivity_de, sensitivity_it)
-        print("\n")
-        print("=" * 70)
-        print("  JOINT SENSITIVITY — income success vs Inflation × Stock CAGR")
-        print("=" * 70)
-        print_inflation_cagr_heatmap(heatmap_de, heatmap_it, target_success=target_success)
-        print_summary_q3(ff_de, ff_it, config)
+                         future_monthly_income_value, target_annual_net_income, )
+        print_summary_q0(config, projection_result, scenario_1_result, scenario_2_result,
+                         mc1, mc2, years_de, years_it)
         print_summary_q2a(combined_de, combined_it, config, target_success,
                           cagr_stock_s1, cagr_stock_s2)
         print_summary_q2b(grids_de, grids_it, cagr_income_s1, cagr_income_s2,
                           config, target_success)
         print_summary_q4(opt_result_1, opt_result_2, config)
+        print()
+        print("SENSITIVITY — income success vs each input assumption")
+        print()
+        print_sensitivity_waterfall(sensitivity_de, sensitivity_it)
+        if args.verbose:
+            print("\n")
+            print("JOINT SENSITIVITY — income success vs Inflation × Stock CAGR")
+            print_inflation_cagr_heatmap(heatmap_de, heatmap_it, target_success=target_success)
     clean_summary = summary_buf.getvalue()
     print(clean_summary, end="")
 
@@ -534,9 +544,7 @@ def main() -> None:
         try:
             from agent import generate_action_plan
             print("\n\n")
-            print("=" * 70)
             print(f"{'  ACTION PLAN':^70}")
-            print("=" * 70)
             print()
             print("  Generating via Claude Sonnet — reading full report + summary...")
             print()

@@ -232,8 +232,8 @@ def print_plan_b_hard(
     assumed = config.expected_yearly_growth_stocks_percent
     _HIST_EQUITY_CAGR = 7.0
     target_pct = config.mc_target_success_percent
-    print(f"\n  Plan B Q1a — min stock/month contribution for {target_pct}% stock success")
-    print(f"  Target stock amount at horizon with {target_pct}% success probability")
+    print(f"\n  Plan B Q1a — min stock CAGR for {target_pct}% exact split (stocks AND bonds ≥ req)")
+    print(f"  Required: stocks ≥ required_stocks AND bonds ≥ required_bonds at horizon with {target_pct}% confidence")
     print(f"  Reference: global equity funds have returned ~{_HIST_EQUITY_CAGR:.0f}%/yr nominal historically")
     print(f"  {'─' * 80}")
     for label, cagr in [("Scenario 1 (DE)", cagr_1), ("Scenario 2 (IT)", cagr_2)]:
@@ -263,9 +263,7 @@ def print_stock_allocation_sweep(
     config: Config,
 ) -> None:
     print("\n" * 2, end="")
-    print("=" * 70)
     print(f"{'SENSITIVITY: INITIAL STOCK ALLOCATION':^70}")
-    print("=" * 70)
     print()
     print("  Rate DE / Rate IT = probability that your final portfolio is large")
     print("  enough to sustain your inflation-adjusted retirement income, under")
@@ -297,6 +295,19 @@ def _find_min_contrib(
         if rate >= target_success:
             return contrib
     return None
+
+
+def _find_best_income_split(
+    grids: list[ContributionCagrGrid], cagr_idx: int
+) -> tuple[float, float, float]:
+    """Best (stocks/mo, bonds/mo, P(income)) across all bonds levels for a given CAGR."""
+    best_rate, best_stocks, best_bonds = -1.0, 0.0, 0.0
+    for g in grids:
+        for contrib_idx, contrib in enumerate(g.contribution_values):
+            rate = g.grid[cagr_idx][contrib_idx].success_income
+            if rate > best_rate:
+                best_rate, best_stocks, best_bonds = rate, contrib, g.bonds_monthly
+    return best_stocks, best_bonds, best_rate
 
 
 def _fmt_stocks(min_stocks: float | None, cw: int) -> str:

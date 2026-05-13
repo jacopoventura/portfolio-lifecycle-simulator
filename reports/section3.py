@@ -35,9 +35,7 @@ def print_projection_report(
     print(f"  Expected stock yearly growth: {format_ratio_as_percent(result.stock_expected_yield)}")
     print(f"  Interest on cash (p.a.): {format_ratio_as_percent(result.cash_interest_rate)}")
     print()
-    print("=" * 70)
     print(f"{'PROJECTION: Current accumulation path':^70}")
-    print("=" * 70)
     print("Flow")
     print(f"  Annual net saving (assumption): {format_currency(result.annual_net_saving)}")
     print(f"  Monthly net saving: {format_currency(monthly_net_saving)}")
@@ -271,6 +269,7 @@ def print_current_situation_mc(
 
 
 def _print_top_allocations(result: OptimalAllocationResult, top_n: int = 5) -> None:
+    """Top N upfront allocations ranked by income success rate."""
     cw = 13
     sep = f"  +{'-' * (cw + 2)}+{('-' * (cw + 2) + '+') * 6}"
     hdr = (
@@ -295,6 +294,36 @@ def _print_top_allocations(result: OptimalAllocationResult, top_n: int = 5) -> N
           f" income success rate for each upfront allocation.")
 
 
+def _print_top_portfolio_allocations(result: OptimalAllocationResult, top_n: int = 5) -> None:
+    """Top N upfront allocations ranked by lowest total monthly to reach target portfolio
+    (stocks ≥ required AND bonds ≥ required)."""
+    cw = 13
+    sep = f"  +{'-' * (cw + 2)}+{('-' * (cw + 2) + '+') * 6}"
+    hdr = (
+        f"  | {'→Stocks':^{cw}} | {'→Bonds':^{cw}} | {'Cash kept':^{cw}}"
+        f" | {'Stocks/mo':^{cw}} | {'Bonds/mo':^{cw}} | {'Total/mo':^{cw}} |"
+    )
+    achievable = [p for p in result.grid if p.achievable]
+    if not achievable:
+        print(f"  Target portfolio not achievable with any tested cash allocation.")
+        return
+    ranked = sorted(achievable, key=lambda p: p.monthly_stocks + p.monthly_bonds)[:top_n]
+    print(sep)
+    print(hdr)
+    print(sep)
+    for point in ranked:
+        total = point.monthly_stocks + point.monthly_bonds
+        print(
+            f"  | {format_currency(point.extra_stocks):^{cw}}"
+            f" | {format_currency(point.extra_bonds):^{cw}}"
+            f" | {format_currency(point.new_cash):^{cw}}"
+            f" | {format_currency(point.monthly_stocks):^{cw}}"
+            f" | {format_currency(point.monthly_bonds):^{cw}}"
+            f" | {format_currency(total):^{cw}} |"
+        )
+    print(sep)
+
+
 def print_optimal_allocation_report(
     result_1: OptimalAllocationResult,
     result_2: OptimalAllocationResult,
@@ -307,9 +336,7 @@ def print_optimal_allocation_report(
 
     target_pct = int(round(result_1.target_success * 100))
     print("\n\n")
-    print("=" * 70)
     print(f"{'OPTIMAL CURRENT ALLOCATION':^70}")
-    print("=" * 70)
     print(f"  Total current assets : {format_currency(total_assets)}")
     print(f"  Min cash kept today  : {format_currency(result_1.min_cash_today)}")
     print(f"  Redeployable cash    : {format_currency(available)}")
