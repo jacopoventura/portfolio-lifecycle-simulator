@@ -15,7 +15,11 @@ from reports.formatters import (
     format_currency_signed,
     format_ratio_as_percent,
 )
-from reports.section2 import _find_best_combined, _find_best_income_split, _find_min_contrib
+from reports.section2 import (
+    _find_min_contrib,
+    _find_min_total_combined,
+    _find_min_total_income_split,
+)
 from reports.section3 import _print_top_allocations, _print_top_portfolio_allocations
 
 
@@ -30,7 +34,7 @@ def _q_subsection(title: str) -> None:
     print()
 
 
-def print_summary_q0(
+def print_current_situation_summary(
     config: Config,
     projection_result: ProjectionResult,
     scenario_1: ScenarioResult,
@@ -116,7 +120,7 @@ def print_summary_q0(
     print(f"    IT: {_status_portfolio(mc2.success_rate)}")
 
 
-def print_summary_q1(
+def print_what_you_need_at_horizon(
     config: Config,
     scenario_1: ScenarioResult,
     scenario_2: ScenarioResult,
@@ -163,7 +167,7 @@ def print_summary_q1(
     print(sep)
 
 
-def print_summary_q2a(
+def print_how_to_get_there_portfolio(
     combined_de: CombinedGrid,
     combined_it: CombinedGrid,
     config: Config,
@@ -195,15 +199,15 @@ def print_summary_q2a(
     pw = 8
     grp = cw * 2 + pw + 8
     sep = f"  {'─' * (8 + grp * 2 + 2)}"
-    print(f"  Best P(stocks ≥ req AND bonds ≥ req) at each CAGR  (* = assumed {assumed * 100:.0f}%):")
+    print(f"  Min total/mo for {target_pct}% target (stocks ≥ req AND bonds ≥ req)  (* = assumed {assumed * 100:.0f}%):")
     print(f"  {'CAGR':6}  {'── Scenario 1 (DE) ──':^{grp}}  {'── Scenario 2 (IT) ──':^{grp}}")
     print(f"  {'':6}  {'Stocks/mo':>{cw}}  {'Bonds/mo':>{cw + 1}}  {'P(both)':>{pw}}"
           f"  {'Stocks/mo':>{cw}}  {'Bonds/mo':>{cw + 1}}  {'P(both)':>{pw}}")
     print(sep)
 
     for cagr_idx, cagr in enumerate(combined_de.cagr_values):
-        s_de, b_de, r_de = _find_best_combined(combined_de, cagr_idx)
-        s_it, b_it, r_it = _find_best_combined(combined_it, cagr_idx)
+        s_de, b_de, r_de = _find_min_total_combined(combined_de, cagr_idx, target_success)
+        s_it, b_it, r_it = _find_min_total_combined(combined_it, cagr_idx, target_success)
         marker = "*" if abs(cagr - assumed) < 1e-4 else " "
         over_de = "†" if (s_de + b_de) > monthly_saving + 0.01 else " "
         over_it = "†" if (s_it + b_it) > monthly_saving + 0.01 else " "
@@ -220,10 +224,11 @@ def print_summary_q2a(
               f"  {flag_it}{r_it * 100:>{pw - 2}.1f}%")
 
     print(sep)
-    print(f"  ✓ meets {target_pct}% target  |  † stocks + bonds exceed monthly saving ({format_currency(monthly_saving)}/mo)")
+    print(f"  ✓ meets {target_pct}% target; rows without ✓ show best achievable rate (target unreachable in scan range)")
+    print(f"  † stocks + bonds exceed monthly saving ({format_currency(monthly_saving)}/mo)")
 
 
-def print_summary_q2b(
+def print_how_to_get_there_income(
     grids_de: list[ContributionCagrGrid],
     grids_it: list[ContributionCagrGrid],
     cagr_income_s1: float | None,
@@ -287,7 +292,7 @@ def print_summary_q2b(
     grp = cw2 * 2 + pw + 8
     sep2 = f"  {'─' * (8 + grp * 2 + 2)}"
     print()
-    print(f"  Best P(portfolio income ≥ required income) at each CAGR  (* = assumed {assumed:.0f}%):")
+    print(f"  Min total/mo for {target_pct}% target (income ≥ required)  (* = assumed {assumed:.0f}%):")
     print(f"  {'CAGR':6}  {'── Scenario 1 (DE) ──':^{grp}}  {'── Scenario 2 (IT) ──':^{grp}}")
     print(f"  {'':6}  {'Stocks/mo':>{cw2}}  {'Bonds/mo':>{cw2}}  {'P(income)':>{pw}}"
           f"  {'Stocks/mo':>{cw2}}  {'Bonds/mo':>{cw2}}  {'P(income)':>{pw}}")
@@ -295,8 +300,8 @@ def print_summary_q2b(
 
     cagr_values = grids_de[0].cagr_values
     for cagr_idx, cagr in enumerate(cagr_values):
-        s_de, b_de, r_de = _find_best_income_split(grids_de, cagr_idx)
-        s_it, b_it, r_it = _find_best_income_split(grids_it, cagr_idx)
+        s_de, b_de, r_de = _find_min_total_income_split(grids_de, cagr_idx, target_success)
+        s_it, b_it, r_it = _find_min_total_income_split(grids_it, cagr_idx, target_success)
         marker = "*" if abs(cagr - assumed_frac) < 1e-4 else " "
         flag_de = "✓" if r_de >= target_success else " "
         flag_it = "✓" if r_it >= target_success else " "
@@ -309,10 +314,10 @@ def print_summary_q2b(
               f"  {flag_it}{r_it * 100:>{pw - 2}.1f}%")
 
     print(sep2)
-    print(f"  ✓ meets {target_pct}% target")
+    print(f"  ✓ meets {target_pct}% target; rows without ✓ show best achievable rate (target unreachable in scan range)")
 
 
-def print_summary_q4(
+def print_redeploy_current_assets(
     opt_result_1: OptimalAllocationResult,
     opt_result_2: OptimalAllocationResult,
     config: Config,
@@ -329,17 +334,17 @@ def print_summary_q4(
     print(f"  Redeployable     : {format_currency(available)}")
 
     print()
-    print(f"  2a — Maximize income probability  (P(income ≥ target))")
-    print(f"       Top 3 upfront allocations ranked by best income success rate.")
-    for result in [opt_result_1, opt_result_2]:
-        print(f"  {'─' * 66}")
-        print(f"  {result.scenario_name}")
-        _print_top_allocations(result, top_n=3)
-
-    print()
-    print(f"  2b — Reach target portfolio  (stocks ≥ req AND bonds ≥ req, {target_pct}% confidence)")
+    print(f"  2a — Reach target portfolio  (stocks ≥ req AND bonds ≥ req, {target_pct}% confidence)")
     print(f"       Top 3 upfront allocations ranked by lowest total monthly contribution.")
     for result in [opt_result_1, opt_result_2]:
         print(f"  {'─' * 66}")
         print(f"  {result.scenario_name}")
         _print_top_portfolio_allocations(result, top_n=3)
+
+    print()
+    print(f"  2b — Maximize income probability  (P(income ≥ target))")
+    print(f"       Top 3 upfront allocations ranked by best income success rate.")
+    for result in [opt_result_1, opt_result_2]:
+        print(f"  {'─' * 66}")
+        print(f"  {result.scenario_name}")
+        _print_top_allocations(result, top_n=3)

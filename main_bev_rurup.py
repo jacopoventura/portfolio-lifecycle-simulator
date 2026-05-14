@@ -200,8 +200,8 @@ if __name__ == "__main__":
     print(f"Life expectancy: {life_expectancy}")
     print(f"Total horizon (contribution phase): {total_horizon_years} years")
     print(f"Pension expectation (withdrawal phase): {pension_expectation_years} years")
-    print(f"Monthly contribution (gross): €{monthly_amount_brutto:.2f}")
-    print(f"Monthly contribution (net): €{monthly_amount_netto:.2f}")
+    print(f"Monthly contribution (gross): €{monthly_amount_brutto:,.0f}")
+    print(f"Monthly contribution (net): €{monthly_amount_netto:,.0f}")
 
     # Print comparison table
     print_comparison_table(result_monthly, result_bev, result_rurup, pension_expectation_years, age_start_pension)

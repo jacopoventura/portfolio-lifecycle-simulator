@@ -23,9 +23,9 @@ if __name__ == "__main__":
     
     result = bev.calculate_balance()
     
-    print(f"\nInitial balance: €{bev.initial_balance:,.2f}")
-    print(f"Monthly employee contribution: €{bev.monthly_contribution:,.2f}")
-    print(f"Yearly company contribution: €{bev.yearly_company_contribution:,.2f}")
+    print(f"\nInitial balance: €{bev.initial_balance:,.0f}")
+    print(f"Monthly employee contribution: €{bev.monthly_contribution:,.0f}")
+    print(f"Yearly company contribution: €{bev.yearly_company_contribution:,.0f}")
     print(f"Total horizon: {bev.total_horizon} years")
     print(f"Years until age 55: {bev.horizon_to_55_year_old}")
     print(f"\nGrowth rates (net of {bev.ter*100:.2f}% TER):")
@@ -35,11 +35,11 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("RESULTS")
     print("=" * 70)
-    print(f"Total invested: €{result['total_invested']:,.2f}")
-    print(f"  - Employee contributions: €{result['total_employee_contributions']:,.2f}")
-    print(f"  - Company contributions: €{result['total_company_contributions']:,.2f}")
-    print(f"\nFinal balance: €{result['final_balance']:,.2f}")
-    print(f"Total gains: €{result['total_gains']:,.2f}")
+    print(f"Total invested: €{result['total_invested']:,.0f}")
+    print(f"  - Employee contributions: €{result['total_employee_contributions']:,.0f}")
+    print(f"  - Company contributions: €{result['total_company_contributions']:,.0f}")
+    print(f"\nFinal balance: €{result['final_balance']:,.0f}")
+    print(f"Total gains: €{result['total_gains']:,.0f}")
     print(f"Return on investment: {(result['total_gains'] / result['total_invested'] * 100):.2f}%")
     
     # Show first 5 and last 5 years
@@ -48,13 +48,13 @@ if __name__ == "__main__":
     print("=" * 70)
     for detail in result['yearly_details'][:5]:
         print(f"Year {detail['year']:2d}: "
-              f"€{detail['balance_start']:>10,.2f} → €{detail['balance_end']:>10,.2f} "
-              f"(+€{detail['gains']:>8,.2f} gains, {detail['growth_rate']*100:.1f}% rate)")
+              f"€{detail['balance_start']:>10,.0f} → €{detail['balance_end']:>10,.0f} "
+              f"(+€{detail['gains']:>8,.0f} gains, {detail['growth_rate']*100:.1f}% rate)")
     
     print("\n" + "=" * 70)
     print("YEARLY DETAILS (Last 5 years)")
     print("=" * 70)
     for detail in result['yearly_details'][-5:]:
         print(f"Year {detail['year']:2d}: "
-              f"€{detail['balance_start']:>10,.2f} → €{detail['balance_end']:>10,.2f} "
-              f"(+€{detail['gains']:>8,.2f} gains, {detail['growth_rate']*100:.1f}% rate)")
+              f"€{detail['balance_start']:>10,.0f} → €{detail['balance_end']:>10,.0f} "
+              f"(+€{detail['gains']:>8,.0f} gains, {detail['growth_rate']*100:.1f}% rate)")

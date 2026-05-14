@@ -47,11 +47,11 @@ from reports.section3 import (
     print_projection_yield_table,
 )
 from reports.summary import (
-    print_summary_q0,
-    print_summary_q1,
-    print_summary_q2a,
-    print_summary_q2b,
-    print_summary_q4,
+    print_current_situation_summary,
+    print_what_you_need_at_horizon,
+    print_how_to_get_there_portfolio,
+    print_how_to_get_there_income,
+    print_redeploy_current_assets,
 )
 
 __all__ = [
@@ -99,9 +99,9 @@ __all__ = [
     "print_projection_report",
     "print_projection_yield_table",
     # summary
-    "print_summary_q0",
-    "print_summary_q1",
-    "print_summary_q2a",
-    "print_summary_q2b",
-    "print_summary_q4",
+    "print_current_situation_summary",
+    "print_what_you_need_at_horizon",
+    "print_how_to_get_there_portfolio",
+    "print_how_to_get_there_income",
+    "print_redeploy_current_assets",
 ]

@@ -26,7 +26,7 @@ if __name__ == "__main__":
     
     result = rurup.calculate_balance()
     
-    print(f"\nMonthly contribution: €{rurup.saving_contribution:,.2f}")
+    print(f"\nMonthly contribution: €{rurup.saving_contribution:,.0f}")
     print(f"Investment horizon: {rurup.horizon} years")
     print(f"Tax refund rate: {rurup.tax_refund_rate*100:.0f}%")
     print(f"TER: {rurup.ter*100:.2f}%")
@@ -35,15 +35,15 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("RESULTS")
     print("=" * 70)
-    print(f"Total invested: €{result['total_invested']:,.2f}")
-    print(f"Cumulative tax refunds: €{result['cumulative_tax_refunds']:,.2f}")
-    print(f"Net cost (after refunds): €{result['net_cost']:,.2f}")
-    print(f"Final balance: €{result['final_balance']:,.2f}")
-    print(f"Total gains: €{result['final_balance'] - result['total_invested']:,.2f}")
-    print(f"Effective gain (vs net cost): €{result['final_balance'] - result['net_cost']:,.2f}")
+    print(f"Total invested: €{result['total_invested']:,.0f}")
+    print(f"Cumulative tax refunds: €{result['cumulative_tax_refunds']:,.0f}")
+    print(f"Net cost (after refunds): €{result['net_cost']:,.0f}")
+    print(f"Final balance: €{result['final_balance']:,.0f}")
+    print(f"Total gains: €{result['final_balance'] - result['total_invested']:,.0f}")
+    print(f"Effective gain (vs net cost): €{result['final_balance'] - result['net_cost']:,.0f}")
     print(f"\nVorabpauschale (advance tax):")
-    print(f"  Total Vorabpauschale: €{result['total_vorabpauschale']:,.2f}")
-    print(f"  Total tax paid: €{result['total_tax_paid']:,.2f}")
+    print(f"  Total Vorabpauschale: €{result['total_vorabpauschale']:,.0f}")
+    print(f"  Total tax paid: €{result['total_tax_paid']:,.0f}")
     
     # Show first 5 and last 5 years
     print("\n" + "=" * 70)
@@ -52,10 +52,10 @@ if __name__ == "__main__":
     print(f"{'Year':<6} {'Balance':>12} {'Vorabpauschale':>15} {'Tax Paid':>10} {'Tax Refund':>12}")
     print("-" * 70)
     for i, (detail, refund) in enumerate(zip(result['yearly_details'][:5], result['yearly_tax_refunds'][:5])):
-        print(f"Year {detail['year']:2d} €{detail['balance_before_tax']:>10,.2f} "
-              f"€{detail['vorabpauschale']:>13,.2f} "
-              f"€{detail['tax_paid']:>8,.2f} "
-              f"€{refund['tax_refund']:>10,.2f}")
+        print(f"Year {detail['year']:2d} €{detail['balance_before_tax']:>10,.0f} "
+              f"€{detail['vorabpauschale']:>13,.0f} "
+              f"€{detail['tax_paid']:>8,.0f} "
+              f"€{refund['tax_refund']:>10,.0f}")
     
     print("\n" + "=" * 70)
     print("YEARLY DETAILS (Last 5 years)")
@@ -63,10 +63,10 @@ if __name__ == "__main__":
     print(f"{'Year':<6} {'Balance':>12} {'Vorabpauschale':>15} {'Tax Paid':>10} {'Tax Refund':>12}")
     print("-" * 70)
     for detail, refund in zip(result['yearly_details'][-5:], result['yearly_tax_refunds'][-5:]):
-        print(f"Year {detail['year']:2d} €{detail['balance_before_tax']:>10,.2f} "
-              f"€{detail['vorabpauschale']:>13,.2f} "
-              f"€{detail['tax_paid']:>8,.2f} "
-              f"€{refund['tax_refund']:>10,.2f}")
+        print(f"Year {detail['year']:2d} €{detail['balance_before_tax']:>10,.0f} "
+              f"€{detail['vorabpauschale']:>13,.0f} "
+              f"€{detail['tax_paid']:>8,.0f} "
+              f"€{refund['tax_refund']:>10,.0f}")
     
     print("\n" + "=" * 70)
     print("COMPARISON WITH LOWER TER")
@@ -82,9 +82,9 @@ if __name__ == "__main__":
     rurup_low_ter.ter = 0.005  # 0.5% TER (like ETF)
     result_low_ter = rurup_low_ter.calculate_balance()
     
-    print(f"Standard Rürup (1.5% TER): €{result['final_balance']:,.2f}")
-    print(f"Low-cost option (0.5% TER): €{result_low_ter['final_balance']:,.2f}")
-    print(f"Difference: €{result_low_ter['final_balance'] - result['final_balance']:,.2f}")
+    print(f"Standard Rürup (1.5% TER): €{result['final_balance']:,.0f}")
+    print(f"Low-cost option (0.5% TER): €{result_low_ter['final_balance']:,.0f}")
+    print(f"Difference: €{result_low_ter['final_balance'] - result['final_balance']:,.0f}")
     print(f"Impact of TER: {((result_low_ter['final_balance'] - result['final_balance']) / result['final_balance'] * 100):.1f}% more with lower TER")
     
     print("\n" + "=" * 70)
@@ -97,12 +97,12 @@ if __name__ == "__main__":
         reinvest_ter=0.005  # Low-cost ETF with 0.5% TER
     )
     
-    print(f"\nMain Rürup balance: €{result_with_reinvestment['final_balance']:,.2f}")
-    print(f"Tax refunds received: €{result_with_reinvestment['cumulative_tax_refunds']:,.2f}")
-    print(f"Reinvested refunds balance: €{result_with_reinvestment['reinvested_balance']:,.2f}")
-    print(f"Reinvestment gain: €{result_with_reinvestment['reinvestment_gain']:,.2f}")
-    print(f"\nTOTAL (Main + Reinvested): €{result_with_reinvestment['total_combined_balance']:,.2f}")
-    print(f"Total effective gain: €{result_with_reinvestment['total_combined_balance'] - result_with_reinvestment['net_cost']:,.2f}")
+    print(f"\nMain Rürup balance: €{result_with_reinvestment['final_balance']:,.0f}")
+    print(f"Tax refunds received: €{result_with_reinvestment['cumulative_tax_refunds']:,.0f}")
+    print(f"Reinvested refunds balance: €{result_with_reinvestment['reinvested_balance']:,.0f}")
+    print(f"Reinvestment gain: €{result_with_reinvestment['reinvestment_gain']:,.0f}")
+    print(f"\nTOTAL (Main + Reinvested): €{result_with_reinvestment['total_combined_balance']:,.0f}")
+    print(f"Total effective gain: €{result_with_reinvestment['total_combined_balance'] - result_with_reinvestment['net_cost']:,.0f}")
     
     # Show first few years of reinvestment details
     print("\n" + "=" * 70)
@@ -112,6 +112,6 @@ if __name__ == "__main__":
     print("-" * 70)
     reinvest_details = result_with_reinvestment['reinvestment_details']['yearly_reinvestment_details']
     for detail in reinvest_details[:5]:
-        print(f"Year {detail['year_received']:2d} €{detail['refund_amount']:>8,.2f} "
-              f"{detail['years_invested']:>11d} €{detail['final_balance']:>13,.2f} "
-              f"€{detail['gain']:>10,.2f}")
+        print(f"Year {detail['year_received']:2d} €{detail['refund_amount']:>8,.0f} "
+              f"{detail['years_invested']:>11d} €{detail['final_balance']:>13,.0f} "
+              f"€{detail['gain']:>10,.0f}")

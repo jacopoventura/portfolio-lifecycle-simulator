@@ -641,6 +641,7 @@ def compute_optimal_allocation(
     seed: int = 42,
     n_simulations: int = _OPTIMIZE_N_SIMULATIONS,
 ) -> OptimalAllocationResult:
+    min_cash_today = max(min_cash_today, config.cash_reserve_at_horizon)
     available = max(0.0, config.current_cash - min_cash_today)
     extra_stocks_values = np.arange(0.0, available + step * 0.5, step)
     master_rng = np.random.default_rng(seed)

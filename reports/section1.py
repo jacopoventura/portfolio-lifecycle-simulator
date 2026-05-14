@@ -286,25 +286,33 @@ def print_sensitivity_waterfall(
 ) -> None:
     base_de = result_de.entries[0].success_base if result_de.entries else 0.0
     base_it = result_it.entries[0].success_base if result_it.entries else 0.0
-    print(f"  Base income success rate:  DE {base_de * 100:.1f}%   IT {base_it * 100:.1f}%")
-    print()
 
     col_param = 24
     col_base  = 12
     col_delta = 10
     col_val   = 9
 
-    header = (
+    de_label = f"DE {base_de * 100:.1f}%"
+    it_label = f"IT {base_it * 100:.1f}%"
+    header_top = (
+        f"  {'':<{col_param}}"
+        f"{'':<{col_base}}"
+        f"{'':<{col_delta}}"
+        f"{de_label:^{col_val * 2}}"
+        f"{it_label:^{col_val * 2}}"
+    )
+    header_bot = (
         f"  {'Parameter':<{col_param}}"
         f"{'Base':>{col_base}}"
         f"{'Delta':>{col_delta}}"
-        f"{'DE +δ':>{col_val}}"
-        f"{'DE −δ':>{col_val}}"
-        f"{'IT +δ':>{col_val}}"
-        f"{'IT −δ':>{col_val}}"
+        f"{'+δ':>{col_val}}"
+        f"{'−δ':>{col_val}}"
+        f"{'+δ':>{col_val}}"
+        f"{'−δ':>{col_val}}"
     )
     sep = "  " + "─" * (col_param + col_base + col_delta + col_val * 4)
-    print(header)
+    print(header_top)
+    print(header_bot)
     print(sep)
 
     de_map = {e.parameter: e for e in result_de.entries}

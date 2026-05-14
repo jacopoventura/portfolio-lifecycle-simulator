@@ -300,7 +300,7 @@ def _combined_grid(name: str = "DE") -> CombinedGrid:
 
 class TestFormatters:
     def test_format_currency(self):
-        assert format_currency(1234.5) == "1,234.50"
+        assert format_currency(1234.0) == "1,234"
 
     def test_format_currency_signed_positive(self):
         assert format_currency_signed(100.0).startswith("+")

@@ -82,8 +82,8 @@ def validate_projection_inputs(config: Config, cash_interest_rate: float) -> Non
         raise ValueError("current_cash must be greater than or equal to 0.")
     if not 0 <= config.cash_reserve_at_horizon <= config.current_cash:
         raise ValueError(
-            f"cash_reserve_at_horizon ({config.cash_reserve_at_horizon:,.2f}) must be between 0 "
-            f"and current_cash ({config.current_cash:,.2f})."
+            f"cash_reserve_at_horizon ({config.cash_reserve_at_horizon:,.0f}) must be between 0 "
+            f"and current_cash ({config.current_cash:,.0f})."
         )
     if config.annual_net_saving < 0:
         raise ValueError("annual_net_saving must be greater than or equal to 0.")

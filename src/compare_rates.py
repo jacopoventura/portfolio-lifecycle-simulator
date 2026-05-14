@@ -34,17 +34,17 @@ for years in horizons:
     diff_percent = (difference / fv_compound) * 100
     
     print(f"{years} year{'s' if years > 1 else ' ':<8} "
-          f"${fv_simple:>12,.2f}  "
-          f"${fv_compound:>12,.2f}  "
-          f"${difference:>10,.2f}  "
+          f"${fv_simple:>12,.0f}  "
+          f"${fv_compound:>12,.0f}  "
+          f"${difference:>10,.0f}  "
           f"{diff_percent:>6.2f}%")
 
 print()
 print("Key Observations:")
 print("- Absolute difference grows exponentially with horizon")
 print("- Relative difference (%) grows roughly linearly")
-print(f"- At 1 year:  ~${(1239.26 - 1238.03):.2f} difference (~0.1%)")
-print(f"- At 10 years: ~${(17308 - 17105):.2f} difference (~1.2%)")
+print(f"- At 1 year:  ~${(1239.26 - 1238.03):.0f} difference (~0.1%)")
+print(f"- At 10 years: ~${(17308 - 17105):.0f} difference (~1.2%)")
 print(f"- At 30 years: difference would be ~3.5%")
 print()
 print("Rule of thumb: For 7% annual rate, expect ~0.12% difference per year of horizon")

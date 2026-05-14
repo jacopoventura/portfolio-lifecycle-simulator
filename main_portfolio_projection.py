@@ -48,11 +48,11 @@ from reports import (
     print_sensitivity_table,
     print_sensitivity_waterfall,
     print_stock_allocation_sweep,
-    print_summary_q0,
-    print_summary_q1,
-    print_summary_q2a,
-    print_summary_q2b,
-    print_summary_q4,
+    print_current_situation_summary,
+    print_what_you_need_at_horizon,
+    print_how_to_get_there_portfolio,
+    print_how_to_get_there_income,
+    print_redeploy_current_assets,
 )
 
 
@@ -86,19 +86,19 @@ def _print_verbose_report(
         config.annual_net_saving / current_portfolio_total * 100
         if current_portfolio_total > 0 else 0.0
     )
-    print(f"  Current portfolio : {current_portfolio_total:,.2f}  "
+    print(f"  Current portfolio : {current_portfolio_total:,.0f}  "
           f"(stocks {config.current_stock_value:,.0f}"
           f"  |  bonds {config.current_bonds_value:,.0f}"
           f"  |  cash {config.current_cash:,.0f})")
-    print(f"  Annual saving     : {config.annual_net_saving:,.2f}/yr"
+    print(f"  Annual saving     : {config.annual_net_saving:,.0f}/yr"
           f"  =  {saving_pct:.1f}% of current portfolio")
     print()
     print(f"  Target monthly retirement income (today's money) : "
-          f"{config.target_monthly_retirement_income:,.2f}/mo")
+          f"{config.target_monthly_retirement_income:,.0f}/mo")
     print(f"  Inflation-adjusted at horizon ({config.years:.0f}y)          : "
-          f"{future_monthly_income_value:,.2f}/mo")
+          f"{future_monthly_income_value:,.0f}/mo")
     print(f"  Annual net income inflation-adjusted at horizon  : "
-          f"{target_annual_net_income:,.2f}/yr")
+          f"{target_annual_net_income:,.0f}/yr")
     print()
     print_scenarios_report(
         s1=scenario_1_result, s2=scenario_2_result,
@@ -519,15 +519,15 @@ def main() -> None:
     # ── Print clean summary (always) ───────────────────────────────────
     summary_buf = io.StringIO()
     with contextlib.redirect_stdout(summary_buf):
-        print_summary_q1(config, scenario_1_result, scenario_2_result,
+        print_what_you_need_at_horizon(config, scenario_1_result, scenario_2_result,
                          future_monthly_income_value, target_annual_net_income, )
-        print_summary_q0(config, projection_result, scenario_1_result, scenario_2_result,
+        print_current_situation_summary(config, projection_result, scenario_1_result, scenario_2_result,
                          mc1, mc2, years_de, years_it)
-        print_summary_q2a(combined_de, combined_it, config, target_success,
+        print_how_to_get_there_portfolio(combined_de, combined_it, config, target_success,
                           cagr_stock_s1, cagr_stock_s2)
-        print_summary_q2b(grids_de, grids_it, cagr_income_s1, cagr_income_s2,
+        print_how_to_get_there_income(grids_de, grids_it, cagr_income_s1, cagr_income_s2,
                           config, target_success)
-        print_summary_q4(opt_result_1, opt_result_2, config)
+        print_redeploy_current_assets(opt_result_1, opt_result_2, config)
         print()
         print("SENSITIVITY — income success vs each input assumption")
         print()

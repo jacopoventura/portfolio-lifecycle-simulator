@@ -2,11 +2,11 @@ import os
 
 
 def format_currency(value: float) -> str:
-    return f"{value:,.2f}"
+    return f"{value:,.0f}"
 
 
 def format_currency_signed(value: float) -> str:
-    return f"{value:+,.2f}"
+    return f"{value:+,.0f}"
 
 
 def format_ratio_as_percent(value: float) -> str:

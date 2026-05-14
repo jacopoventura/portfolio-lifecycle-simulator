@@ -1,5 +1,12 @@
-from models import AllocationSweepResult, ChainedMCResult, DecumInflationCagrGrid, DecumulationResult, JointProbabilityResult, SORRResult, (
-    SWRSweepResult)
+from models import (
+    AllocationSweepResult,
+    ChainedMCResult,
+    DecumInflationCagrGrid,
+    DecumulationResult,
+    JointProbabilityResult,
+    SORRResult,
+    SWRSweepResult,
+)
 from reports.formatters import _print_section, _print_subsection, format_currency
 
 

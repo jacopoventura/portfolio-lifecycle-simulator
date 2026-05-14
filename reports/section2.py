@@ -297,17 +297,50 @@ def _find_min_contrib(
     return None
 
 
-def _find_best_income_split(
-    grids: list[ContributionCagrGrid], cagr_idx: int
+def _find_min_total_combined(
+    grid: CombinedGrid, cagr_idx: int, target_success: float
 ) -> tuple[float, float, float]:
-    """Best (stocks/mo, bonds/mo, P(income)) across all bonds levels for a given CAGR."""
-    best_rate, best_stocks, best_bonds = -1.0, 0.0, 0.0
+    """Min total (stocks_mo + bonds_mo) reaching target_success on P(both); else best achievable."""
+    target_min_total = float("inf")
+    target_pick: tuple[float, float, float] | None = None
+    best_rate = -1.0
+    best_total = float("inf")
+    best: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    for bonds_idx, bonds_mo in enumerate(grid.bonds_values):
+        for stocks_idx, stocks_mo in enumerate(grid.stocks_values):
+            rate = grid.grid[cagr_idx][bonds_idx][stocks_idx].success_combined
+            total = stocks_mo + bonds_mo
+            if rate >= target_success and total < target_min_total:
+                target_min_total = total
+                target_pick = (stocks_mo, bonds_mo, rate)
+            if rate > best_rate or (rate == best_rate and total < best_total):
+                best_rate = rate
+                best_total = total
+                best = (stocks_mo, bonds_mo, rate)
+    return target_pick if target_pick is not None else best
+
+
+def _find_min_total_income_split(
+    grids: list[ContributionCagrGrid], cagr_idx: int, target_success: float
+) -> tuple[float, float, float]:
+    """Min total (stocks_mo + bonds_mo) reaching target_success on P(income); else best achievable."""
+    target_min_total = float("inf")
+    target_pick: tuple[float, float, float] | None = None
+    best_rate = -1.0
+    best_total = float("inf")
+    best_stocks, best_bonds = 0.0, 0.0
     for g in grids:
         for contrib_idx, contrib in enumerate(g.contribution_values):
             rate = g.grid[cagr_idx][contrib_idx].success_income
-            if rate > best_rate:
-                best_rate, best_stocks, best_bonds = rate, contrib, g.bonds_monthly
-    return best_stocks, best_bonds, best_rate
+            total = contrib + g.bonds_monthly
+            if rate >= target_success and total < target_min_total:
+                target_min_total = total
+                target_pick = (contrib, g.bonds_monthly, rate)
+            if rate > best_rate or (rate == best_rate and total < best_total):
+                best_rate = rate
+                best_total = total
+                best_stocks, best_bonds = contrib, g.bonds_monthly
+    return target_pick if target_pick is not None else (best_stocks, best_bonds, best_rate)
 
 
 def _fmt_stocks(min_stocks: float | None, cw: int) -> str:
