@@ -2104,7 +2104,7 @@ def print_plan_verdict(
     sorr_stress_survival: float | None = None,
     sorr_baseline_survival: float | None = None,
     joint_survival_rate: float | None = None,
-) -> None:
+) -> "PlanVerdictSummary":
     """Single-page synthesis: current position, target, gap, verdict, top risks."""
     horizon_yrs     = int(cfg_raw.get("years", 15))
     inflation       = float(cfg_raw.get("expected_inflation_percent", 2.3)) / 100
@@ -2230,6 +2230,16 @@ def print_plan_verdict(
     print(f"    {risk_n}. Inflation: each +1pp above {inflation*100:.1f}%/yr adds"
           f" ≈ €{extra_infl:,.0f} to the total retirement cost.")
     print()
+
+    from models import PlanVerdictSummary
+    return PlanVerdictSummary(
+        required_portfolio=required_portfolio,
+        projected_portfolio_config=proj_base,
+        projected_portfolio_cape=proj_cape,
+        gap_config=gap_base,
+        on_track=gap_base >= 0,
+        joint_survival_rate=joint_survival_rate,
+    )
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -2621,9 +2631,10 @@ def main() -> None:
         )
 
     # ── Plan verdict ──────────────────────────────────────────────────────────
+    plan_verdict = None
     if cfg_raw:
         print()
-        print_plan_verdict(
+        plan_verdict = print_plan_verdict(
             cfg_raw,
             cape_ratio=cape_ratio,
             cape_long_run_mean=cape_long_run_mean,
@@ -2633,7 +2644,7 @@ def main() -> None:
             joint_survival_rate=joint_survival,
         )
 
-    return results, opt_result
+    return results, opt_result, plan_verdict
 
 
 if __name__ == "__main__":

@@ -27,31 +27,25 @@ import io
 import sys
 from pathlib import Path
 
+from models import DecumulationSummary, PlanVerdictSummary
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 _CONTEXT_FILE = Path("historical_data") / "last_run_context.txt"
 
 
-def _re(text: str, pattern: str, default: str = "—") -> str:
-    """Return first capture group from regex search, or default."""
-    import re
-    m = re.search(pattern, text)
-    return m.group(1).strip() if m else default
+def _fmt_eur(v: float | None) -> str:
+    return f"€{v:,.0f}" if v is not None else "—"
 
 
-def _re_nth(text: str, pattern: str, n: int = 1, default: str = "—") -> str:
-    """Return capture group from Nth regex match (1-based)."""
-    import re
-    for i, m in enumerate(re.finditer(pattern, text), 1):
-        if i == n:
-            return m.group(1).strip()
-    return default
+def _fmt_pct(v: float | None, scale: float = 100.0) -> str:
+    return f"{v * scale:.1f}%" if v is not None else "—"
 
 
 def print_plan_snapshot(
-    cagr_text: str,
-    decum_text: str,
+    plan_verdict: PlanVerdictSummary | None,
+    decum_summary: DecumulationSummary | None,
     required_cagr: float | None,
     p50: float,
 ) -> None:
@@ -60,36 +54,50 @@ def print_plan_snapshot(
     print(f"{'  PLAN SNAPSHOT':^{W}}")
     print()
 
-    # ── Accumulation (from Plan Verdict in cagr_text) ─────────────────────────
-    on_track    = "✓  ON TRACK" if "VERDICT  ✓" in cagr_text else "✗  SHORTFALL"
-    req_portf   = _re(cagr_text, r"Required portfolio\s*:\s*(€[\d ,]+)")
-    proj_portf  = _re(cagr_text, r"Config\s+\([^)]+\)\s+→\s+(€[\d ,]+)")
-    gap_val     = _re(cagr_text, r"\bgap\s+([+\-−]?€[\d ,]+)")
-    joint_cagr  = _re(cagr_text, r"Joint P\(accumulate AND survive[^)]+\)\s*:\s*([\d.]+)%")
-    req_cagr_str = f"{required_cagr * 100:.1f}%" if required_cagr else "—"
-
     print(f"  Accumulation")
+    if plan_verdict is not None:
+        req_portf   = _fmt_eur(plan_verdict.required_portfolio)
+        proj_portf  = _fmt_eur(plan_verdict.projected_portfolio_config)
+        gap         = plan_verdict.gap_config
+        gap_sign    = "+" if gap >= 0 else "−"
+        gap_str     = f"{gap_sign}€{abs(gap):,.0f}"
+        on_track    = "✓  ON TRACK" if plan_verdict.on_track else "✗  SHORTFALL"
+    else:
+        req_portf = proj_portf = gap_str = "—"
+        on_track  = "—"
+
+    req_cagr_str = _fmt_pct(required_cagr)
     print(f"    Required portfolio   : {req_portf}")
-    print(f"    Projected (config)   : {proj_portf}   gap {gap_val}")
+    print(f"    Projected (config)   : {proj_portf}   gap {gap_str}")
     if p50 > 0:
         print(f"    MC P50 at horizon    : €{p50:,.0f}")
     print(f"    Required stock CAGR  : {req_cagr_str}  (IT scenario)")
     print(f"    Verdict              : {on_track}")
     print()
 
-    # ── Decumulation ──────────────────────────────────────────────────────────
-    req_decum  = _re(decum_text, r"Required portfolio \(income formula\):\s*(€[\d ,]+)")
-    target_wd  = _re(decum_text, r"target withdrawal:\s*(€[\d ,]+)")
-    surv_fixed = _re_nth(decum_text, r"Final survival rate \(year \d+\):\s*([\d.]+)%", n=1)
-    surv_gk    = _re_nth(decum_text, r"Final survival rate \(year \d+\):\s*([\d.]+)%", n=2)
-    joint_dec  = _re(decum_text, r"True joint P\(accumulate AND survive[^)]+\)\s*:\s*([\d.]+)%")
-    joint_show = joint_cagr if joint_cagr != "—" else joint_dec
+    # Prefer the joint rate reported in the CAGR Plan Verdict (chained MC sample
+    # the cagr section uses); fall back to decum's chained joint if not present.
+    joint_acc_surv: float | None = None
+    if plan_verdict is not None and plan_verdict.joint_survival_rate is not None:
+        joint_acc_surv = plan_verdict.joint_survival_rate
+    elif decum_summary is not None:
+        joint_acc_surv = decum_summary.joint_survival_chained
 
-    print(f"  Decumulation  (40yr horizon, fixed nominal withdrawal)")
+    if decum_summary is not None:
+        req_decum   = _fmt_eur(decum_summary.required_portfolio_income)
+        target_wd   = _fmt_eur(decum_summary.target_monthly_withdrawal)
+        surv_fixed  = _fmt_pct(decum_summary.survival_fixed_final)
+        surv_gk     = _fmt_pct(decum_summary.survival_gk_final)
+        horizon_yr  = decum_summary.n_years
+    else:
+        req_decum = target_wd = surv_fixed = surv_gk = "—"
+        horizon_yr = 40
+
+    print(f"  Decumulation  ({horizon_yr}yr horizon, fixed nominal withdrawal)")
     print(f"    Required portfolio   : {req_decum}  →  {target_wd}/mo")
-    print(f"    Survival yr40 — fixed: {surv_fixed}%")
-    print(f"    Survival yr40 — GK   : {surv_gk}%")
-    print(f"    Joint P(acc ∧ surv)  : {joint_show}%")
+    print(f"    Survival yr{horizon_yr} — fixed: {surv_fixed}")
+    print(f"    Survival yr{horizon_yr} — GK   : {surv_gk}")
+    print(f"    Joint P(acc ∧ surv)  : {_fmt_pct(joint_acc_surv)}")
     print()
     print()
 
@@ -134,18 +142,33 @@ def _capture(fn, argv_extra: list[str] | None = None):
     return buf.getvalue(), result
 
 
-def _save_context(accum: str, decum: str, cagr: str, required_cagr: float | None) -> None:
+_SUMMARIES_FILE = _CONTEXT_FILE.with_name("last_run_summaries.json")
+
+
+def _save_context(
+    accum: str, decum: str, cagr: str,
+    required_cagr: float | None,
+    decum_summary: DecumulationSummary | None,
+    plan_verdict: PlanVerdictSummary | None,
+) -> None:
+    import json
+    from dataclasses import asdict
     _CONTEXT_FILE.parent.mkdir(exist_ok=True)
     with _CONTEXT_FILE.open("w") as f:
         f.write(f"REQUIRED_CAGR_IT={required_cagr or ''}\n")
         f.write("===ACCUM===\n" + accum)
         f.write("\n===DECUM===\n" + decum)
         f.write("\n===CAGR===\n" + cagr)
+    payload = {
+        "decum_summary": asdict(decum_summary) if decum_summary else None,
+        "plan_verdict":  asdict(plan_verdict)  if plan_verdict  else None,
+    }
+    _SUMMARIES_FILE.write_text(json.dumps(payload, indent=2))
 
 
-def _load_context() -> tuple[str, str, str, float | None]:
+def _load_context() -> tuple[str, str, str, float | None, DecumulationSummary | None, PlanVerdictSummary | None]:
     if not _CONTEXT_FILE.exists():
-        return "", "", "", None
+        return "", "", "", None, None, None
     text = _CONTEXT_FILE.read_text()
     required_cagr = None
     if text.startswith("REQUIRED_CAGR_IT="):
@@ -155,7 +178,17 @@ def _load_context() -> tuple[str, str, str, float | None]:
     accum = text.split("===DECUM===")[0].replace("===ACCUM===\n", "")
     decum = text.split("===DECUM===")[1].split("===CAGR===")[0].strip()
     cagr  = text.split("===CAGR===")[1].strip() if "===CAGR===" in text else ""
-    return accum, decum, cagr, required_cagr
+
+    decum_summary: DecumulationSummary | None = None
+    plan_verdict:  PlanVerdictSummary  | None = None
+    if _SUMMARIES_FILE.exists():
+        import json
+        payload = json.loads(_SUMMARIES_FILE.read_text())
+        if payload.get("decum_summary"):
+            decum_summary = DecumulationSummary(**payload["decum_summary"])
+        if payload.get("plan_verdict"):
+            plan_verdict = PlanVerdictSummary(**payload["plan_verdict"])
+    return accum, decum, cagr, required_cagr, decum_summary, plan_verdict
 
 
 # ── Sections ──────────────────────────────────────────────────────────────────
@@ -177,26 +210,26 @@ def run_accum(verbose: bool = False) -> tuple[str, float, float, float | None, i
     return text, p50, tail, required_cagr, tail_pct
 
 
-def run_decum(p50: float, tail: float, tail_pct: int) -> str:
-    """Run decumulation section. Returns report text."""
+def run_decum(p50: float, tail: float, tail_pct: int) -> tuple[str, DecumulationSummary | None]:
+    """Run decumulation section. Returns (report text, typed summary)."""
     import main_decumulation as m
 
     print()
     _banner(2, "DECUMULATION — 40-year withdrawal survival & joint probability")
-    text, _ = _capture(
+    text, summary = _capture(
         lambda: m.main(
             p50_override=p50 if p50 > 0 else None,
             tail_override=tail if tail > 0 else None,
         ),
         ["--no-clear", "--tail-pct", str(tail_pct)],
     )
-    return text
+    return text, summary if isinstance(summary, DecumulationSummary) else None
 
 
-def run_cagr() -> tuple[str, object]:
+def run_cagr() -> tuple[str, object, PlanVerdictSummary | None]:
     """Run CAGR / instrument section.
 
-    Returns (agent_summary_text, OptimalPortfolioResult | None).
+    Returns (agent_summary_text, OptimalPortfolioResult | None, PlanVerdictSummary | None).
     The text is trimmed to the AGENT SUMMARY section to keep agent context compact.
     """
     import main_cagr_analysis as m
@@ -204,12 +237,13 @@ def run_cagr() -> tuple[str, object]:
     _banner(3, "INSTRUMENTS — historical CAGR, volatility, correlation + optimiser")
     text, result = _capture(m.main, ["--no-clear"])
 
-    # result is (list[TickerResult], OptimalPortfolioResult | None)
-    opt_result = result[1] if isinstance(result, tuple) else None
+    # result is (list[TickerResult], OptimalPortfolioResult | None, PlanVerdictSummary | None)
+    opt_result = result[1] if isinstance(result, tuple) and len(result) > 1 else None
+    plan_verdict = result[2] if isinstance(result, tuple) and len(result) > 2 else None
 
     marker = "AGENT SUMMARY"
     agent_text = text[text.index(marker):] if marker in text else text
-    return agent_text, opt_result
+    return agent_text, opt_result, plan_verdict
 
 
 def run_agent(
@@ -267,7 +301,7 @@ def main() -> None:
     start = _SECTIONS.index(args.start_from)
 
     # Load cached context for sections we're skipping
-    accum_text, decum_text, cagr_text, required_cagr = _load_context()
+    accum_text, decum_text, cagr_text, required_cagr, decum_summary, plan_verdict = _load_context()
     p50 = tail = 0.0
     tail_pct = 3
     config_toml = Path("config.toml").read_text() if Path("config.toml").exists() else ""
@@ -278,17 +312,17 @@ def main() -> None:
 
     # Section 2: Decumulation
     if start <= _SECTIONS.index("decum"):
-        decum_text = run_decum(p50, tail, tail_pct)
+        decum_text, decum_summary = run_decum(p50, tail, tail_pct)
 
     # Section 3: CAGR + optimiser
     if start <= _SECTIONS.index("cagr"):
-        cagr_text, _opt = run_cagr()
+        cagr_text, _opt, plan_verdict = run_cagr()
 
     # Cache context for --from agent re-runs
-    _save_context(accum_text, decum_text, cagr_text, required_cagr)
+    _save_context(accum_text, decum_text, cagr_text, required_cagr, decum_summary, plan_verdict)
 
     # Plan snapshot — compact summary printed before agent
-    print_plan_snapshot(cagr_text, decum_text, required_cagr, p50)
+    print_plan_snapshot(plan_verdict, decum_summary, required_cagr, p50)
 
     # Section 4: AI Agent — only when explicitly requested
     if args.agent or args.start_from == "agent":

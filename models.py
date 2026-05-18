@@ -440,3 +440,25 @@ class ChainedMCResult:
     cond_survival_accum_success: float   # P(survive | accum >= required)
     cond_survival_accum_fail: float      # P(survive | accum < required)
     starting_portfolio_percentiles: dict[int, float]   # P5/P25/P50/P75/P95 of year-N wealth
+
+
+@dataclass
+class PlanVerdictSummary:
+    """Typed values from main_cagr_analysis Plan Verdict block — used by Plan Snapshot."""
+    required_portfolio: float                # income-formula required portfolio at horizon
+    projected_portfolio_config: float        # projected with config stock CAGR
+    projected_portfolio_cape: float | None   # projected with CAPE-implied CAGR (None when CAPE unavailable)
+    gap_config: float                        # projected_config − required (positive = surplus)
+    on_track: bool                           # gap_config >= 0
+    joint_survival_rate: float | None        # chained MC P(accumulate AND survive), if computed
+
+
+@dataclass
+class DecumulationSummary:
+    """Typed values from main_decumulation — used by Plan Snapshot."""
+    required_portfolio_income: float         # income-formula required portfolio
+    target_monthly_withdrawal: float         # nominal monthly withdrawal at horizon
+    n_years: int                              # decumulation horizon
+    survival_fixed_final: float              # final-year survival, fixed-withdrawal strategy
+    survival_gk_final: float                 # final-year survival, Guyton-Klinger strategy
+    joint_survival_chained: float            # chained accum→decum joint probability

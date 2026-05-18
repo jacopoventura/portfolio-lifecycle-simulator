@@ -101,7 +101,7 @@ def main(
     portfolio_override: float | None = None,
     p50_override: float | None = None,
     tail_override: float | None = None,
-) -> str | None:
+) -> "DecumulationSummary | None":
     """Run decumulation analysis.
 
     When called programmatically from main.py, pass portfolio_override / p50_override /
@@ -237,6 +237,16 @@ def main(
     print_chained_mc(chained)
     print_swr_sweep(swr_sweep)
     print_decum_inflation_cagr_heatmap(decum_grid)
+
+    from models import DecumulationSummary
+    return DecumulationSummary(
+        required_portfolio_income=required_portfolio,
+        target_monthly_withdrawal=target_monthly_nom,
+        n_years=config.mc_decumulation_years,
+        survival_fixed_final=result_fixed.survival_by_year[-1] if result_fixed.survival_by_year else result_fixed.survival_rate,
+        survival_gk_final=result_gk.survival_by_year[-1] if result_gk.survival_by_year else result_gk.survival_rate,
+        joint_survival_chained=chained.joint_survival_rate,
+    )
 
 
 if __name__ == "__main__":

@@ -7,10 +7,6 @@ REPORTING / FI-VERDICT FIXES (ranked by FI-impact)
 1. Unify the required-portfolio definition. Section 1 uses the asset-split formula (€2.07M IT) and prints "WARNING — financial plan must be
    revised" at 76% success; Plan Verdict uses the income formula (€1.96M) and prints "✓ ON TRACK". Same inputs, contradictory verdicts.
    Pick one canonical target, or print both side-by-side with explicit labels.
-2. Fix Plan Snapshot to consume typed values, not regex over rendered text. main.py:65-85 currently extracts "Required portfolio (decum)",
-   "Required stock CAGR", "target withdrawal" via regex from the printed report — they all render as "—" because the anchors no longer match.
-   run_accum already returns required_cagr/p50 as floats; extend the return tuple to also pass target_withdrawal and required_portfolio_decum
-   into print_plan_snapshot directly.
 3. Surface Required stock CAGR next to CAPE forward + S&P 10y rolling EUR + optimised ETF P50/P5, all in one row of Plan Snapshot.
    Single-glance realism check: "do I need X% and does X% exist in the real world?".
 4. Filter ETF optimiser candidates by P5 != n/a (or flag them). Current best pick (IS3R 19% + QQQ 25% + IGLN 10% + TDIV 46%) shows P5=n/a
