@@ -8,6 +8,7 @@ from models import (
     OptimalAllocationResult,
     ProjectionResult,
     ScenarioResult,
+    SensitivityWaterfallResult,
     YearsToTargetsResult,
 )
 from reports.formatters import (
@@ -16,7 +17,6 @@ from reports.formatters import (
     format_ratio_as_percent,
 )
 from reports.section2 import (
-    _find_min_contrib,
     _find_min_total_combined,
     _find_min_total_income_split,
 )
@@ -65,7 +65,6 @@ def print_current_situation_summary(
     tgt = config.mc_target_success_percent
     current_year = datetime.date.today().year
     plan_years = int(round(config.years))
-    plan_year = current_year + plan_years
 
     def _yr(y: int | None) -> str:
         if y is None:
@@ -76,7 +75,7 @@ def print_current_situation_summary(
 
     rw, pw, yw = 22, 7, 16
     sep2 = f"  +{'-' * (rw + 2)}+{'-' * (pw + 2)}+{'-' * (yw + 2)}+{'-' * (pw + 2)}+{'-' * (yw + 2)}+"
-    print(f"  MC success — current plan  (target ≥{tgt}%, plan year {plan_year}):")
+    print(f"  Success probability (Monte Carlo) : target probability ≥ {tgt}%, {plan_years} years horizon")
     print(sep2)
     print(f"  | {'':<{rw}} "
           f"| {'DE %':>{pw}} | {f'DE yr → {tgt}%':>{yw}} "
@@ -178,7 +177,7 @@ def print_how_to_get_there_portfolio(
     print()
     _q_section("HOW TO GET THERE")
     _q_subsection(f"Problem 1 — Optimization of monthly contribution for different stock CAGR (keep current cash)")
-    print(f"Exact split  (stocks ≥ req AND bonds ≥ req, {config.mc_target_success_percent}% confidence)")
+    print(f"1a. Target portfolio with required stock/bond split, {config.mc_target_success_percent}% success rate")
 
     assumed = config.expected_yearly_growth_stocks_percent / 100
     target_pct = config.mc_target_success_percent
@@ -190,16 +189,22 @@ def print_how_to_get_there_portfolio(
         delta = cagr * 100 - config.expected_yearly_growth_stocks_percent
         return f"{cagr * 100:.1f}%  ({delta:+.1f}pp vs assumed {config.expected_yearly_growth_stocks_percent:.1f}%)"
 
-    print(f"  Min CAGR for {target_pct}% exact split (stocks AND bonds):")
+    print(f"  Min required CAGR:")
     print(f"    DE : {_cagr_fmt(cagr_stock_s1)}")
     print(f"    IT : {_cagr_fmt(cagr_stock_s2)}")
     print()
 
+    max_stock_mo = max(combined_de.stocks_values)
+    max_bonds_de = max(combined_de.bonds_values)
+    max_bonds_it = max(combined_it.bonds_values)
     cw = 12
     pw = 8
     grp = cw * 2 + pw + 8
     sep = f"  {'─' * (8 + grp * 2 + 2)}"
-    print(f"  Min total/mo for {target_pct}% target (stocks ≥ req AND bonds ≥ req)  (* = assumed {assumed * 100:.0f}%):")
+    print(f"  Min total contribution per month (* = current base assumption;"
+          f" search caps: stocks {format_currency(max_stock_mo)}/mo"
+          f" · bonds DE {format_currency(max_bonds_de)}/mo"
+          f" · bonds IT {format_currency(max_bonds_it)}/mo):")
     print(f"  {'CAGR':6}  {'── Scenario 1 (DE) ──':^{grp}}  {'── Scenario 2 (IT) ──':^{grp}}")
     print(f"  {'':6}  {'Stocks/mo':>{cw}}  {'Bonds/mo':>{cw + 1}}  {'P(both)':>{pw}}"
           f"  {'Stocks/mo':>{cw}}  {'Bonds/mo':>{cw + 1}}  {'P(both)':>{pw}}")
@@ -237,7 +242,7 @@ def print_how_to_get_there_income(
     target_success: float,
 ) -> None:
     print()
-    _q_subsection(f"Any split  (income ≥ target, {config.mc_target_success_percent}% confidence)")
+    _q_subsection(f"1b. Target income without required stock/bond split (income ≥ target), {config.mc_target_success_percent}% success rate)")
 
     assumed = config.expected_yearly_growth_stocks_percent
     target_pct = config.mc_target_success_percent
@@ -249,50 +254,25 @@ def print_how_to_get_there_income(
         delta = cagr * 100 - assumed
         return f"{cagr * 100:.1f}%  ({delta:+.1f}pp vs assumed {assumed:.1f}%)"
 
-    print(f"  Min CAGR for {target_pct}% income target (any stock/bond split):")
+    print(f"  Min required CAGR:")
     print(f"    DE : {_cagr_fmt(cagr_income_s1)}")
     print(f"    IT : {_cagr_fmt(cagr_income_s2)}")
     print()
 
     assumed_frac = assumed / 100
-    cw = 12
-    mw = 5
-    grp = cw * 3 + 4
-    sep = f"  {'─' * (mw + 2 + grp * 2 + 2)}"
-    print(f"  Min stocks/mo for {target_pct}% income target at {assumed:.1f}%/yr CAGR:")
-    print(sep)
-    print(f"  {'Mult':<{mw}}  {'── Scenario 1 (DE) ──':^{grp}}  {'── Scenario 2 (IT) ──':^{grp}}")
-    print(f"  {'':<{mw}}  {'Bonds/mo':>{cw}}  {'Stocks/mo':>{cw}}  {'Cash/mo':>{cw}}"
-          f"  {'Bonds/mo':>{cw}}  {'Stocks/mo':>{cw}}  {'Cash/mo':>{cw}}")
-    print(sep)
-
-    for grid_de, grid_it in zip(grids_de, grids_it):
-        cagr_idx = min(
-            range(len(grid_de.cagr_values)),
-            key=lambda i: abs(grid_de.cagr_values[i] - assumed_frac),
-        )
-        min_de = _find_min_contrib(grid_de, cagr_idx, use_hard=False, target_success=target_success)
-        min_it = _find_min_contrib(grid_it, cagr_idx, use_hard=False, target_success=target_success)
-
-        b_label = f"{grid_de.bonds_multiplier}×"
-        b_de = format_currency(grid_de.bonds_monthly)
-        b_it = format_currency(grid_it.bonds_monthly)
-        s_de = format_currency(min_de) if min_de is not None else "n/a"
-        c_de = format_currency(max(0.0, monthly_saving - (min_de or 0.0) - grid_de.bonds_monthly)) if min_de is not None else "—"
-        s_it = format_currency(min_it) if min_it is not None else "n/a"
-        c_it = format_currency(max(0.0, monthly_saving - (min_it or 0.0) - grid_it.bonds_monthly)) if min_it is not None else "—"
-
-        print(f"  {b_label:<{mw}}  {b_de:>{cw}}  {s_de:>{cw}}  {c_de:>{cw}}"
-              f"  {b_it:>{cw}}  {s_it:>{cw}}  {c_it:>{cw}}")
-
-    print(sep)
+    max_stock_mo = max(grids_de[0].contribution_values)
+    max_bonds_de = max(g.bonds_monthly for g in grids_de)
+    max_bonds_it = max(g.bonds_monthly for g in grids_it)
 
     # ── Best P(income) at each CAGR ───────────────────────────────────────────
     cw2, pw = 12, 10
     grp = cw2 * 2 + pw + 8
     sep2 = f"  {'─' * (8 + grp * 2 + 2)}"
     print()
-    print(f"  Min total/mo for {target_pct}% target (income ≥ required)  (* = assumed {assumed:.0f}%):")
+    print(f"  Min total contribution per month (* = current base assumption;"
+          f" search caps: stocks {format_currency(max_stock_mo)}/mo"
+          f" · bonds DE {format_currency(max_bonds_de)}/mo"
+          f" · bonds IT {format_currency(max_bonds_it)}/mo):")
     print(f"  {'CAGR':6}  {'── Scenario 1 (DE) ──':^{grp}}  {'── Scenario 2 (IT) ──':^{grp}}")
     print(f"  {'':6}  {'Stocks/mo':>{cw2}}  {'Bonds/mo':>{cw2}}  {'P(income)':>{pw}}"
           f"  {'Stocks/mo':>{cw2}}  {'Bonds/mo':>{cw2}}  {'P(income)':>{pw}}")
@@ -321,9 +301,15 @@ def print_redeploy_current_assets(
     opt_result_1: OptimalAllocationResult,
     opt_result_2: OptimalAllocationResult,
     config: Config,
+    opt_result_1_capped: OptimalAllocationResult | None = None,
+    opt_result_2_capped: OptimalAllocationResult | None = None,
 ) -> None:
     print()
-    _q_subsection("Problem 2 — Optimization of monthly contribution and current asset allocation for different stock CAGR ")
+    print()
+    _q_subsection(
+        f"Problem 2 — Optimal upfront allocation + monthly contribution "
+        f"(at expected stock CAGR {config.expected_yearly_growth_stocks_percent:.1f}%)"
+    )
 
     total_assets = config.current_stock_value + config.current_bonds_value + config.current_cash
     available = config.current_cash - opt_result_1.min_cash_today
@@ -335,16 +321,229 @@ def print_redeploy_current_assets(
 
     print()
     print(f"  2a — Reach target portfolio  (stocks ≥ req AND bonds ≥ req, {target_pct}% confidence)")
-    print(f"       Top 3 upfront allocations ranked by lowest total monthly contribution.")
+    print(f"       Top 3 upfront allocations ranked by lowest total monthly contribution. No budget constraint.")
     for result in [opt_result_1, opt_result_2]:
         print(f"  {'─' * 66}")
         print(f"  {result.scenario_name}")
         _print_top_portfolio_allocations(result, top_n=3)
 
+    monthly_saving = config.annual_net_saving / 12
+
+    if opt_result_1_capped is not None and opt_result_2_capped is not None:
+        print()
+        print(f"  2a (budget-constrained) — Reach target portfolio  "
+              f"(stocks ≥ req AND bonds ≥ req, {target_pct}% confidence)")
+        print(f"       Same optimization as 2a, but stocks/mo + bonds/mo ≤ "
+              f"{format_currency(monthly_saving)}/mo (full monthly saving; cash = residual, may be 0).")
+        for result in [opt_result_1_capped, opt_result_2_capped]:
+            print(f"  {'─' * 66}")
+            print(f"  {result.scenario_name}")
+            _print_top_portfolio_allocations(result, top_n=3)
+
     print()
     print(f"  2b — Maximize income probability  (P(income ≥ target))")
+    print(f"       Budget constraint: stocks/mo + bonds/mo ≤ {format_currency(monthly_saving)}/mo"
+          f"  (full monthly saving; cash = residual, may be 0).")
     print(f"       Top 3 upfront allocations ranked by best income success rate.")
     for result in [opt_result_1, opt_result_2]:
         print(f"  {'─' * 66}")
         print(f"  {result.scenario_name}")
         _print_top_allocations(result, top_n=3)
+
+
+def _closest_cagr_idx(cagr_values: list[float], target: float) -> int:
+    return min(range(len(cagr_values)), key=lambda i: abs(cagr_values[i] - target))
+
+
+def _best_income_point(opt_result: OptimalAllocationResult):
+    if not opt_result.grid:
+        return None
+    return max(opt_result.grid, key=lambda p: p.best_success_rate)
+
+
+def _worst_negative_entries(result: SensitivityWaterfallResult, top_n: int = 2):
+    def _worst(e):
+        return min(e.success_up - e.success_base, e.success_down - e.success_base)
+    return sorted(result.entries, key=_worst)[:top_n]
+
+
+def print_takeaway(
+    config: Config,
+    scenario_1: ScenarioResult,
+    scenario_2: ScenarioResult,
+    mc1: MonteCarloResult,
+    mc2: MonteCarloResult,
+    combined_de: CombinedGrid,
+    combined_it: CombinedGrid,
+    grids_de: list[ContributionCagrGrid],
+    grids_it: list[ContributionCagrGrid],
+    opt_result_1: OptimalAllocationResult,
+    opt_result_2: OptimalAllocationResult,
+    opt_result_1_capped: OptimalAllocationResult,
+    opt_result_2_capped: OptimalAllocationResult,
+    sensitivity_de: SensitivityWaterfallResult,
+    sensitivity_it: SensitivityWaterfallResult,
+    target_success: float,
+    future_monthly_income: float,
+    target_annual_net_income: float,
+) -> None:
+    assumed = config.expected_yearly_growth_stocks_percent / 100
+    target_pct = int(round(target_success * 100))
+    stock_pct = 100 - config.bonds_percentage
+    years = int(round(config.years))
+    monthly_saving = config.annual_net_saving / 12
+
+    _q_section("TAKE AWAY  —  portfolio projection")
+
+    # 1. Required portfolio at horizon
+    print(f"  1. Required portfolio at horizon ({years}y)")
+    print(f"     Target income : {format_currency(future_monthly_income)}/mo"
+          f"  ({format_currency(target_annual_net_income)}/yr, inflation-adjusted)")
+    print(f"     Composition   : stocks {stock_pct}% · bonds {config.bonds_percentage}%")
+    for s in (scenario_1, scenario_2):
+        tag = s.name.split()[-1].strip("()")
+        print(f"     {tag} : {format_currency(s.required_total_portfolio):>14}"
+              f"  (stocks {format_currency(s.required_stock_amount)}"
+              f" · bonds {format_currency(s.required_bonds_amount)})")
+    print()
+
+    # 2. Current situation with expected success rate
+    total = config.current_stock_value + config.current_bonds_value + config.current_cash
+    s_mo = monthly_saving * config.maximum_stock_monthly_investment_pct
+    b_mo = monthly_saving * config.maximum_bonds_monthly_investment_pct
+    c_mo = max(0.0, monthly_saving - s_mo - b_mo)
+    print(f"  2. Current situation  (target success ≥ {target_pct}% over {years}y)")
+    print(f"     Portfolio : {format_currency(total)}"
+          f"  (stocks {format_currency(config.current_stock_value)}"
+          f" · bonds {format_currency(config.current_bonds_value)}"
+          f" · cash {format_currency(config.current_cash)})")
+    print(f"     Saving    : {format_currency(config.annual_net_saving)}/yr"
+          f"  ⇒ stocks {format_currency(s_mo)}/mo"
+          f" · bonds {format_currency(b_mo)}/mo"
+          f" · cash {format_currency(c_mo)}/mo")
+    for mc in (mc1, mc2):
+        tag = mc.name.split()[-1].strip("()")
+        flag_p = "✓" if mc.success_rate >= target_success else "✗"
+        flag_i = "✓" if mc.success_rate_income_only >= target_success else "✗"
+        print(f"     {tag} : portfolio {flag_p} {mc.success_rate * 100:>4.1f}%"
+              f"  (stocks {mc.success_rate_stock_only * 100:.1f}%"
+              f" · bonds {mc.success_rate_bond_only * 100:.1f}%)"
+              f"  · income {flag_i} {mc.success_rate_income_only * 100:>4.1f}%")
+    print()
+
+    # 3. Reach TARGET ALLOCATION
+    print(f"  3. Improve success rate to reach TARGET ALLOCATION (stocks AND bonds ≥ req)"
+          f" with fixed CAGR of {assumed * 100:.1f}%")
+    print(f"     a) Keep current allocation — min monthly contribution:")
+    cagr_idx_de = _closest_cagr_idx(combined_de.cagr_values, assumed)
+    cagr_idx_it = _closest_cagr_idx(combined_it.cagr_values, assumed)
+    for grid, idx, mc in ((combined_de, cagr_idx_de, mc1), (combined_it, cagr_idx_it, mc2)):
+        s, b, r = _find_min_total_combined(grid, idx, target_success)
+        tag = grid.scenario_name.split()[-1].strip("()")
+        flag = "✓" if r >= target_success else " "
+        over = "†" if (s + b) > monthly_saving + 0.01 else ""
+        delta = (r - mc.success_rate) * 100
+        print(f"        {tag} : stocks {format_currency(s)}/mo"
+              f" · bonds {format_currency(b)}/mo"
+              f" · total {format_currency(s + b)}/mo{over}"
+              f"  P(both)={flag}{r * 100:.1f}%"
+              f"  (baseline {mc.success_rate * 100:.1f}%, {delta:+.1f}pp)")
+
+    print(f"     b) Optimize current allocation + monthly contribution"
+          f" (redeploy cash beyond {format_currency(opt_result_1_capped.min_cash_today)} reserve,"
+          f" stocks/mo + bonds/mo ≤ {format_currency(monthly_saving)}/mo full saving):")
+    for opt, mc in ((opt_result_1_capped, mc1), (opt_result_2_capped, mc2)):
+        tag = opt.scenario_name.split()[-1].strip("()")
+        p = opt.optimal
+        if p is not None:
+            moves = []
+            if p.extra_stocks > 0:
+                moves.append(f"cash → stocks {format_currency(p.extra_stocks)}")
+            if p.extra_bonds > 0:
+                moves.append(f"cash → bonds {format_currency(p.extra_bonds)}")
+            move_str = "; ".join(moves) if moves else "no upfront move"
+            delta = (opt.target_success - mc.success_rate) * 100
+            over = "†" if p.total_monthly > monthly_saving + 0.01 else ""
+            print(f"        {tag} : {move_str}"
+                  f"  ⇒ stocks {format_currency(p.monthly_stocks)}/mo"
+                  f" · bonds {format_currency(p.monthly_bonds)}/mo"
+                  f" · total {format_currency(p.total_monthly)}/mo{over}"
+                  f"  P(both)=✓{opt.target_success * 100:.1f}%"
+                  f"  (baseline {mc.success_rate * 100:.1f}%, {delta:+.1f}pp)")
+            continue
+        # Target unreachable in scanned range — report the best achievable P(both)
+        # along with the (upfront move, stocks/mo, bonds/mo) that produced it.
+        best = max(opt.grid, key=lambda q: q.portfolio_ceiling_rate, default=None)
+        if best is None or best.portfolio_ceiling_rate <= 0:
+            print(f"        {tag} : not achievable in scanned range")
+            continue
+        delta = (best.portfolio_ceiling_rate - mc.success_rate) * 100
+        moves = []
+        if best.extra_stocks > 0:
+            moves.append(f"cash → stocks {format_currency(best.extra_stocks)}")
+        if best.extra_bonds > 0:
+            moves.append(f"cash → bonds {format_currency(best.extra_bonds)}")
+        move_str = "; ".join(moves) if moves else "no upfront move"
+        print(f"        {tag} : target unreachable — best achievable: {move_str}"
+              f"  ⇒ stocks {format_currency(best.ceiling_stocks_mo)}/mo"
+              f" · bonds {format_currency(best.ceiling_bonds_mo)}/mo"
+              f"  P(both)= {best.portfolio_ceiling_rate * 100:.1f}%"
+              f"  (baseline {mc.success_rate * 100:.1f}%, {delta:+.1f}pp)")
+    print()
+
+    # 4. Reach TARGET INCOME
+    print(f"  4. Improve success rate to reach TARGET INCOME (P(income ≥ target))"
+          f" with fixed CAGR of {assumed * 100:.1f}%")
+    print(f"     a) Keep current allocation — min monthly contribution:")
+    cagr_idx_inc = _closest_cagr_idx(grids_de[0].cagr_values, assumed)
+    for grids, label in ((grids_de, scenario_1.name), (grids_it, scenario_2.name)):
+        s, b, r = _find_min_total_income_split(grids, cagr_idx_inc, target_success)
+        tag = label.split()[-1].strip("()")
+        flag = "✓" if r >= target_success else " "
+        over = "†" if (s + b) > monthly_saving + 0.01 else ""
+        print(f"        {tag} : stocks {format_currency(s)}/mo"
+              f" · bonds {format_currency(b)}/mo"
+              f" · total {format_currency(s + b)}/mo{over}"
+              f"  P(income)={flag}{r * 100:.1f}%")
+
+    print(f"     b) Optimize current allocation + monthly contribution"
+          f" (redeploy cash beyond {format_currency(opt_result_1.min_cash_today)} reserve,"
+          f" stocks/mo + bonds/mo ≤ {format_currency(monthly_saving)}/mo full saving):")
+    for opt, mc in ((opt_result_1, mc1), (opt_result_2, mc2)):
+        tag = opt.scenario_name.split()[-1].strip("()")
+        p = _best_income_point(opt)
+        if p is None:
+            print(f"        {tag} : not available")
+            continue
+        moves = []
+        if p.extra_stocks > 0:
+            moves.append(f"cash → stocks {format_currency(p.extra_stocks)}")
+        if p.extra_bonds > 0:
+            moves.append(f"cash → bonds {format_currency(p.extra_bonds)}")
+        move_str = "; ".join(moves) if moves else "no upfront move"
+        delta = (p.best_success_rate - mc.success_rate_income_only) * 100
+        if p.best_success_rate >= target_success:
+            prefix = f"{move_str}"
+            rate_str = f"P(income)=✓{p.best_success_rate * 100:.1f}%"
+        else:
+            prefix = f"target unreachable — best achievable: {move_str}"
+            rate_str = f"P(income)= {p.best_success_rate * 100:.1f}%"
+        print(f"        {tag} : {prefix}"
+              f"  ⇒ stocks {format_currency(p.income_stock_mo)}/mo"
+              f" · bonds {format_currency(p.income_bonds_mo)}/mo"
+              f"  {rate_str}"
+              f"  (baseline {mc.success_rate_income_only * 100:.1f}%, {delta:+.1f}pp)")
+    print()
+
+    # 5. Major risks
+    print(f"  5. Major risks  (top 2 negative impacts on income success)")
+    for result in (sensitivity_de, sensitivity_it):
+        tag = result.scenario_name.split()[-1].strip("()")
+        top = _worst_negative_entries(result, top_n=2)
+        parts = []
+        for e in top:
+            worst = min(e.success_up - e.success_base, e.success_down - e.success_base)
+            side = "+δ" if (e.success_up - e.success_base) <= (e.success_down - e.success_base) else "−δ"
+            parts.append(f"{e.parameter} ({side} {e.delta_label}) → {worst * 100:+.1f}pp")
+        print(f"     {tag} : " + "  ·  ".join(parts) if parts else f"     {tag} : n/a")
+    print()

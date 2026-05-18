@@ -296,32 +296,62 @@ def _print_top_allocations(result: OptimalAllocationResult, top_n: int = 5) -> N
 
 def _print_top_portfolio_allocations(result: OptimalAllocationResult, top_n: int = 5) -> None:
     """Top N upfront allocations ranked by lowest total monthly to reach target portfolio
-    (stocks ≥ required AND bonds ≥ required)."""
+    (stocks ≥ required AND bonds ≥ required). When target is unachievable in the scan,
+    fall back to showing the points with the highest portfolio_ceiling_rate (best P(both))."""
     cw = 13
-    sep = f"  +{'-' * (cw + 2)}+{('-' * (cw + 2) + '+') * 6}"
-    hdr = (
-        f"  | {'→Stocks':^{cw}} | {'→Bonds':^{cw}} | {'Cash kept':^{cw}}"
-        f" | {'Stocks/mo':^{cw}} | {'Bonds/mo':^{cw}} | {'Total/mo':^{cw}} |"
-    )
     achievable = [p for p in result.grid if p.achievable]
-    if not achievable:
+    if achievable:
+        sep = f"  +{'-' * (cw + 2)}+{('-' * (cw + 2) + '+') * 7}"
+        hdr = (
+            f"  | {'→Stocks':^{cw}} | {'→Bonds':^{cw}} | {'Cash kept':^{cw}}"
+            f" | {'Stocks/mo':^{cw}} | {'Bonds/mo':^{cw}} | {'Total/mo':^{cw}} | {'P(both)':^{cw}} |"
+        )
+        ranked = sorted(achievable, key=lambda p: p.monthly_stocks + p.monthly_bonds)[:top_n]
+        print(sep)
+        print(hdr)
+        print(sep)
+        for point in ranked:
+            total = point.monthly_stocks + point.monthly_bonds
+            rate_str = f"{point.q1_success_rate * 100:.1f}%"
+            print(
+                f"  | {format_currency(point.extra_stocks):^{cw}}"
+                f" | {format_currency(point.extra_bonds):^{cw}}"
+                f" | {format_currency(point.new_cash):^{cw}}"
+                f" | {format_currency(point.monthly_stocks):^{cw}}"
+                f" | {format_currency(point.monthly_bonds):^{cw}}"
+                f" | {format_currency(total):^{cw}}"
+                f" | {rate_str:^{cw}} |"
+            )
+        print(sep)
+        return
+
+    # Fallback: target unreachable — rank by best achievable P(both)
+    ranked = sorted(result.grid, key=lambda p: p.portfolio_ceiling_rate, reverse=True)[:top_n]
+    if not ranked or ranked[0].portfolio_ceiling_rate <= 0:
         print(f"  Target portfolio not achievable with any tested cash allocation.")
         return
-    ranked = sorted(achievable, key=lambda p: p.monthly_stocks + p.monthly_bonds)[:top_n]
+    target_pct = int(round(result.target_success * 100))
+    print(f"  Target portfolio ({target_pct}% confidence) not achievable in scan — "
+          f"showing top {top_n} by best P(both):")
+    sep = f"  +{'-' * (cw + 2)}+{('-' * (cw + 2) + '+') * 4}"
+    hdr = (
+        f"  | {'→Stocks':^{cw}} | {'→Bonds':^{cw}} | {'Cash kept':^{cw}}"
+        f" | {'Bonds/mo':^{cw}} | {'Best P(both)':^{cw}} |"
+    )
     print(sep)
     print(hdr)
     print(sep)
     for point in ranked:
-        total = point.monthly_stocks + point.monthly_bonds
         print(
             f"  | {format_currency(point.extra_stocks):^{cw}}"
             f" | {format_currency(point.extra_bonds):^{cw}}"
             f" | {format_currency(point.new_cash):^{cw}}"
-            f" | {format_currency(point.monthly_stocks):^{cw}}"
             f" | {format_currency(point.monthly_bonds):^{cw}}"
-            f" | {format_currency(total):^{cw}} |"
+            f" | {point.portfolio_ceiling_rate * 100:>{cw - 2}.1f}%  |"
         )
     print(sep)
+    print(f"  Best P(both) is the highest stocks-AND-bonds success rate reachable at this upfront")
+    print(f"  allocation across the searched (stocks/mo, bonds/mo) grid.")
 
 
 def print_optimal_allocation_report(

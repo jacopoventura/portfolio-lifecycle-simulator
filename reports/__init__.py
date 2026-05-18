@@ -52,6 +52,7 @@ from reports.summary import (
     print_how_to_get_there_portfolio,
     print_how_to_get_there_income,
     print_redeploy_current_assets,
+    print_takeaway,
 )
 
 __all__ = [
@@ -104,4 +105,5 @@ __all__ = [
     "print_how_to_get_there_portfolio",
     "print_how_to_get_there_income",
     "print_redeploy_current_assets",
+    "print_takeaway",
 ]

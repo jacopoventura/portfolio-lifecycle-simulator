@@ -41,8 +41,9 @@ _SUGGESTIONS_N_SIMULATIONS = 15_000
 _SUGGESTIONS_SCAN_STEP_MAIN = 1_000.0
 _SUGGESTIONS_SCAN_MAX_STOCK = 15_000.0
 _OPTIMIZE_N_SIMULATIONS = 5_000
-_OPTIMIZE_STEP = 50_000.0
+_OPTIMIZE_STEP = 25_000.0
 _OPTIMIZE_MIN_CASH_TODAY = 50_000.0
+_OPTIMIZE_BONDS_LEVELS = 20  # bonds/mo search resolution per upfront cell
 _GRID_N_SIMULATIONS = 15_000
 _GRID_CAGR_MIN = 0.03
 _GRID_CAGR_MAX = 0.09
@@ -360,11 +361,11 @@ def _resolve_workers(n_workers: int | None, n_tasks: int, n_simulations: int) ->
     return max(1, n_workers)
 
 
-def _parallel_map(args_list: list, n_workers: int) -> list:
+def _parallel_map(args_list: list, n_workers: int, worker=_mc_grid_worker) -> list:
     if n_workers > 1:
         with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            return list(pool.map(_mc_grid_worker, args_list))
-    return [_mc_grid_worker(a) for a in args_list]
+            return list(pool.map(worker, args_list))
+    return [worker(a) for a in args_list]
 
 
 def compute_suggestions_scan(
@@ -630,31 +631,172 @@ def _golden_section_max(fn, lo: float, hi: float, n_iter: int = 30) -> float:
     return (lo + hi) / 2.0
 
 
+def _optimize_cell_worker(args: tuple):
+    """Per-upfront-cell 2D search over (stocks/mo, bonds/mo) for Q1 hard target,
+    plus golden-section income split, plus an explicit baseline-contribution floor.
+    Returns a dict consumed by compute_optimal_allocation."""
+    (config, scenario, n_simulations, stock_std, inflation_std, seed,
+     target_success, max_contrib, extra_stocks, extra_bonds,
+     new_stocks, new_bonds, new_cash, deterministic_bonds_mo,
+     current_stocks_mo, current_bonds_mo, investable_monthly, bond_levels,
+     budget_cap) = args
+
+    _base = dict(
+        config=config, scenario=scenario,
+        n_simulations=n_simulations, stock_std=stock_std,
+        inflation_std=inflation_std, seed=seed,
+        initial_stock_override=new_stocks,
+        initial_bonds_override=new_bonds,
+        initial_cash_override=new_cash,
+    )
+
+    def _rate(stocks_mo: float, bonds_mo: float) -> float:
+        return _mc_success_rate(
+            **_base,
+            monthly_stock_contribution_override=stocks_mo,
+            monthly_bonds_contribution_override=bonds_mo,
+        )
+
+    # Candidate bond levels: uniform grid + deterministic + user's current bonds/mo
+    bond_candidates = sorted(set(
+        [round(b, 2) for b in bond_levels]
+        + [round(deterministic_bonds_mo, 2), round(current_bonds_mo, 2)]
+    ))
+
+    best_total = float("inf")
+    best_stocks_mo = float("inf")
+    best_bonds_mo = deterministic_bonds_mo
+    best_rate = 0.0
+    ceiling_max = 0.0
+    ceiling_stocks_mo = 0.0
+    ceiling_bonds_mo = deterministic_bonds_mo
+
+    for bonds_mo in bond_candidates:
+        # When a budget cap is set, the search ceiling on stocks_mo is the remaining
+        # headroom (budget_cap - bonds_mo). Skip bond levels that leave no headroom.
+        if budget_cap is not None:
+            stocks_headroom = budget_cap - bonds_mo
+            if stocks_headroom <= 0:
+                continue
+            search_hi = min(max_contrib, stocks_headroom)
+        else:
+            search_hi = max_contrib
+        ceiling = _rate(search_hi, bonds_mo)
+        if ceiling > ceiling_max:
+            ceiling_max = ceiling
+            ceiling_stocks_mo = search_hi
+            ceiling_bonds_mo = bonds_mo
+        if ceiling < target_success:
+            continue
+        lo, hi = 0.0, search_hi
+        rate_at_hi = ceiling
+        for _ in range(30):
+            mid = (lo + hi) / 2
+            r = _rate(mid, bonds_mo)
+            if r >= target_success:
+                hi = mid
+                rate_at_hi = r
+            else:
+                lo = mid
+        total = hi + bonds_mo
+        if total < best_total:
+            best_total = total
+            best_stocks_mo = hi
+            best_bonds_mo = bonds_mo
+            best_rate = rate_at_hi
+
+    # Baseline floor: user's actual current contributions at this upfront allocation.
+    # Guarantees optimizer ≥ baseline whenever baseline already hits target_success
+    # AND is within the budget cap (if any).
+    baseline_total_candidate = current_stocks_mo + current_bonds_mo
+    if budget_cap is None or baseline_total_candidate <= budget_cap + 1e-6:
+        baseline_rate = _rate(current_stocks_mo, current_bonds_mo)
+        if baseline_rate >= target_success:
+            if baseline_total_candidate < best_total:
+                best_total = baseline_total_candidate
+                best_stocks_mo = current_stocks_mo
+                best_bonds_mo = current_bonds_mo
+                best_rate = baseline_rate
+        if baseline_rate > ceiling_max:
+            ceiling_max = baseline_rate
+            ceiling_stocks_mo = current_stocks_mo
+            ceiling_bonds_mo = current_bonds_mo
+
+    # Income optimiser: vary stocks/bonds split over full monthly saving;
+    # the simulation absorbs (monthly_saving − stocks − bonds) into cash, so cash
+    # is the residual and may be 0 when stocks+bonds = monthly_saving.
+    income_budget = config.annual_net_saving / 12
+    def income_rate_for_f(f: float) -> float:
+        stocks_mo = f * income_budget
+        bonds_mo = (1.0 - f) * income_budget
+        return _mc_success_rate(
+            **_base,
+            monthly_stock_contribution_override=stocks_mo,
+            monthly_bonds_contribution_override=bonds_mo,
+            use_income_metric=True,
+        )
+
+    best_f = _golden_section_max(income_rate_for_f, 0.0, 1.0, n_iter=30)
+    best_income_rate = income_rate_for_f(best_f)
+    opt_stocks_mo = best_f * income_budget
+    opt_bonds_mo = (1.0 - best_f) * income_budget
+
+    achievable = best_total < float("inf")
+    return {
+        "extra_stocks": extra_stocks,
+        "extra_bonds": extra_bonds,
+        "new_stocks": new_stocks,
+        "new_bonds": new_bonds,
+        "new_cash": new_cash,
+        "achievable": achievable,
+        "monthly_stocks": best_stocks_mo if achievable else float("inf"),
+        "monthly_bonds": best_bonds_mo if achievable else deterministic_bonds_mo,
+        "total_monthly": best_total if achievable else float("inf"),
+        "q1_success_rate": best_rate,
+        "portfolio_ceiling_rate": ceiling_max,
+        "ceiling_stocks_mo": ceiling_stocks_mo,
+        "ceiling_bonds_mo": ceiling_bonds_mo,
+        "income_stock_mo": opt_stocks_mo,
+        "income_bonds_mo": opt_bonds_mo,
+        "best_income_rate": best_income_rate,
+    }
+
+
 def compute_optimal_allocation(
     config: Config,
     scenario: ScenarioResult,
     stock_std: float,
     inflation_std: float,
+    current_stocks_mo: float,
+    current_bonds_mo: float,
     target_success: float = 0.95,
     min_cash_today: float = _OPTIMIZE_MIN_CASH_TODAY,
     step: float = _OPTIMIZE_STEP,
     seed: int = 42,
     n_simulations: int = _OPTIMIZE_N_SIMULATIONS,
+    n_bond_levels: int = _OPTIMIZE_BONDS_LEVELS,
+    n_workers: int | None = None,
+    budget_cap: float | None = None,
 ) -> OptimalAllocationResult:
     min_cash_today = max(min_cash_today, config.cash_reserve_at_horizon)
     available = max(0.0, config.current_cash - min_cash_today)
     extra_stocks_values = np.arange(0.0, available + step * 0.5, step)
     master_rng = np.random.default_rng(seed)
-    grid: list[AllocationGridPoint] = []
 
     _cash_pct = max(0.0, 1.0 - config.maximum_stock_monthly_investment_pct
                     - config.maximum_bonds_monthly_investment_pct)
     monthly_cash_contrib = config.annual_net_saving / 12 * _cash_pct
     cash_rate = config.interest_on_cash_pa / 100
     contribution_growth = config.annual_contribution_growth_percent / 100
+    monthly_saving = config.annual_net_saving / 12
     # Monthly budget available for stocks+bonds (cash slice is pre-allocated)
-    investable_monthly = config.annual_net_saving / 12 * (1.0 - _cash_pct)
+    investable_monthly = monthly_saving * (1.0 - _cash_pct)
+    max_contrib = max(scenario.required_monthly_contribution * 25, 25_000.0)
+    # Bond search range: 0 to 2× monthly saving (covers over-budget plans)
+    bond_levels = list(np.linspace(0.0, 2.0 * monthly_saving, n_bond_levels))
 
+    # Build per-cell args
+    args_list = []
     for extra_stocks in extra_stocks_values:
         remaining = available - extra_stocks
         extra_bonds_values = np.arange(0.0, remaining + step * 0.5, step)
@@ -672,7 +814,7 @@ def compute_optimal_allocation(
                 contribution_growth_rate=contribution_growth,
             )
             adjusted_bonds_target = max(0.0, scenario.required_bonds_amount - cash_to_bonds)
-            monthly_bonds = calculate_required_monthly_contribution(
+            deterministic_bonds_mo = calculate_required_monthly_contribution(
                 current_amount=new_bonds,
                 target_amount=adjusted_bonds_target,
                 years=config.years,
@@ -681,70 +823,40 @@ def compute_optimal_allocation(
             )
 
             point_seed = int(master_rng.integers(0, 2**31))
-            # Base args (no bonds override) — used by income optimiser
-            _base = dict(
-                config=config, scenario=scenario,
-                n_simulations=n_simulations, stock_std=stock_std,
-                inflation_std=inflation_std, seed=point_seed,
-                initial_stock_override=new_stocks,
-                initial_bonds_override=new_bonds,
-                initial_cash_override=new_cash,
-            )
-            # Q1 hard-target uses fixed monthly_bonds from bond requirement
-            _q1 = {**_base, "monthly_bonds_contribution_override": monthly_bonds}
-
-            def get_rate(c_stock: float, _q=_q1) -> float:
-                return _mc_success_rate(**_q, monthly_stock_contribution_override=c_stock)
-
-            # Income optimiser: vary stocks/bonds split over investable budget
-            def income_rate_for_f(f: float, _b=_base, _inv=investable_monthly) -> float:
-                stocks_mo = f * _inv
-                bonds_mo = (1.0 - f) * _inv
-                return _mc_success_rate(
-                    **_b,
-                    monthly_stock_contribution_override=stocks_mo,
-                    monthly_bonds_contribution_override=bonds_mo,
-                    use_income_metric=True,
-                )
-
-            max_contrib = max(scenario.required_monthly_contribution * 25, 25_000.0)
-            ceiling_rate = get_rate(max_contrib)
-
-            # Always optimise income split regardless of Q1 achievability
-            best_f = _golden_section_max(income_rate_for_f, 0.0, 1.0, n_iter=30)
-            best_income_rate = income_rate_for_f(best_f)
-            opt_stocks_mo = best_f * investable_monthly
-            opt_bonds_mo = (1.0 - best_f) * investable_monthly
-
-            if ceiling_rate < target_success:
-                grid.append(AllocationGridPoint(
-                    extra_stocks=extra_stocks, extra_bonds=extra_bonds,
-                    new_stocks=new_stocks, new_bonds=new_bonds, new_cash=new_cash,
-                    monthly_stocks=float("inf"), monthly_bonds=monthly_bonds,
-                    total_monthly=float("inf"), achievable=False,
-                    best_success_rate=best_income_rate,
-                    income_stock_mo=opt_stocks_mo,
-                    income_bonds_mo=opt_bonds_mo,
-                ))
-                continue
-
-            lo, hi = 0.0, max_contrib
-            for _ in range(40):
-                mid = (lo + hi) / 2
-                if get_rate(mid) >= target_success:
-                    hi = mid
-                else:
-                    lo = mid
-
-            grid.append(AllocationGridPoint(
-                extra_stocks=extra_stocks, extra_bonds=extra_bonds,
-                new_stocks=new_stocks, new_bonds=new_bonds, new_cash=new_cash,
-                monthly_stocks=hi, monthly_bonds=monthly_bonds,
-                total_monthly=hi + monthly_bonds, achievable=True,
-                best_success_rate=best_income_rate,
-                income_stock_mo=opt_stocks_mo,
-                income_bonds_mo=opt_bonds_mo,
+            args_list.append((
+                config, scenario, n_simulations, stock_std, inflation_std, point_seed,
+                target_success, max_contrib, float(extra_stocks), float(extra_bonds),
+                float(new_stocks), float(new_bonds), float(new_cash),
+                float(deterministic_bonds_mo),
+                float(current_stocks_mo), float(current_bonds_mo),
+                float(investable_monthly), bond_levels,
+                float(budget_cap) if budget_cap is not None else None,
             ))
+
+    workers = _resolve_workers(n_workers, len(args_list), n_simulations)
+    results = _parallel_map(args_list, workers, worker=_optimize_cell_worker)
+
+    grid: list[AllocationGridPoint] = [
+        AllocationGridPoint(
+            extra_stocks=r["extra_stocks"],
+            extra_bonds=r["extra_bonds"],
+            new_stocks=r["new_stocks"],
+            new_bonds=r["new_bonds"],
+            new_cash=r["new_cash"],
+            monthly_stocks=r["monthly_stocks"],
+            monthly_bonds=r["monthly_bonds"],
+            total_monthly=r["total_monthly"],
+            achievable=r["achievable"],
+            best_success_rate=r["best_income_rate"],
+            income_stock_mo=r["income_stock_mo"],
+            income_bonds_mo=r["income_bonds_mo"],
+            portfolio_ceiling_rate=r["portfolio_ceiling_rate"],
+            ceiling_stocks_mo=r["ceiling_stocks_mo"],
+            ceiling_bonds_mo=r["ceiling_bonds_mo"],
+            q1_success_rate=r["q1_success_rate"],
+        )
+        for r in results
+    ]
 
     achievable = [p for p in grid if p.achievable]
     optimal = min(achievable, key=lambda p: p.total_monthly) if achievable else None

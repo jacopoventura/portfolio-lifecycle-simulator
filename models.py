@@ -51,6 +51,10 @@ class Config:
     mc_stock_mean_uncertainty: float = 0.0    # prior std on stock CAGR (epistemic uncertainty)
     mc_stock_vol_uncertainty: float = 0.0     # prior std on stock volatility (epistemic uncertainty)
 
+    @property
+    def monthly_saving(self) -> float:
+        return self.annual_net_saving / 12
+
     @classmethod
     def from_dict(cls, config: dict[str, object]) -> "Config":
         return cls(
@@ -238,6 +242,10 @@ class AllocationGridPoint:
     best_success_rate: float = 0.0
     income_stock_mo: float = 0.0   # optimal stocks/mo for income success (optimised split)
     income_bonds_mo: float = 0.0   # optimal bonds/mo for income success (optimised split)
+    portfolio_ceiling_rate: float = 0.0  # P(both) at max stock contribution — best achievable for Q1
+    ceiling_stocks_mo: float = 0.0       # stocks/mo that produced portfolio_ceiling_rate
+    ceiling_bonds_mo: float = 0.0        # bonds/mo that produced portfolio_ceiling_rate
+    q1_success_rate: float = 0.0  # P(both) measured at (monthly_stocks, monthly_bonds) — the achieved rate at the optimum
 
 
 @dataclass

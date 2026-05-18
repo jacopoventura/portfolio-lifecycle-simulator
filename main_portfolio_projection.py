@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import io
+from dataclasses import dataclass
 from pathlib import Path
 import tomllib
 
@@ -12,7 +13,21 @@ from finance import (
     run_scenario,
     validate_config_inputs,
 )
-from models import Config
+from models import (
+    BondStockGrid,
+    CombinedGrid,
+    Config,
+    ContributionCagrGrid,
+    FinancialFreedomResult,
+    InflationCagrGrid,
+    MonteCarloResult,
+    OptimalAllocationResult,
+    ProjectionResult,
+    ProjectionYieldScenarioResult,
+    ScenarioResult,
+    SensitivityWaterfallResult,
+    YearsToTargetsResult,
+)
 from monte_carlo import (
     _OPTIMIZE_N_SIMULATIONS,
     compute_bond_stock_grid,
@@ -53,30 +68,105 @@ from reports import (
     print_how_to_get_there_portfolio,
     print_how_to_get_there_income,
     print_redeploy_current_assets,
+    print_takeaway,
 )
 
 
-def _print_verbose_report(
-    config, args,
-    future_monthly_income_value, target_annual_net_income,
-    projection_result, stock_gain_fraction,
-    scenario_1_result, scenario_2_result,
-    projected_yield_scenario_1, projected_yield_scenario_2,
-    cash_to_bonds_at_horizon_val, estimated_final_cash,
-    inflation_rate, stock_expected_yield, bonds_yield, withdrawal_rate,
-    stock_std, inflation_std, target_success,
-    current_stock_mo, current_bonds_mo, bonds_mo_de, bonds_mo_it,
-    mc1, mc2,
-    cagr_stock_s1, cagr_stock_s2,
-    grids_de, grids_it,
-    bond_grid_de, bond_grid_it,
-    combined_de, combined_it,
-    cagr_income_s1, cagr_income_s2,
-    ff_de, ff_it,
-    opt_result_1, opt_result_2,
-    stock_sweep,
-    heatmap_de, heatmap_it,
-) -> None:
+@dataclass
+class ReportContext:
+    """Aggregated inputs for verbose / summary / takeaway rendering.
+    Owned by main(); built once and passed to renderers."""
+    config: Config
+    args: argparse.Namespace
+    future_monthly_income_value: float
+    target_annual_net_income: float
+    projection_result: ProjectionResult
+    stock_gain_fraction: float
+    scenario_1_result: ScenarioResult
+    scenario_2_result: ScenarioResult
+    projected_yield_scenario_1: ProjectionYieldScenarioResult
+    projected_yield_scenario_2: ProjectionYieldScenarioResult
+    cash_to_bonds_at_horizon_val: float
+    estimated_final_cash: float
+    inflation_rate: float
+    stock_expected_yield: float
+    bonds_yield: float
+    withdrawal_rate: float
+    stock_std: float
+    inflation_std: float
+    target_success: float
+    current_stock_mo: float
+    current_bonds_mo: float
+    bonds_mo_de: float
+    bonds_mo_it: float
+    mc1: MonteCarloResult
+    mc2: MonteCarloResult
+    cagr_stock_s1: float | None
+    cagr_stock_s2: float | None
+    grids_de: list[ContributionCagrGrid]
+    grids_it: list[ContributionCagrGrid]
+    bond_grid_de: BondStockGrid
+    bond_grid_it: BondStockGrid
+    combined_de: CombinedGrid
+    combined_it: CombinedGrid
+    cagr_income_s1: float | None
+    cagr_income_s2: float | None
+    ff_de: FinancialFreedomResult
+    ff_it: FinancialFreedomResult
+    opt_result_1: OptimalAllocationResult
+    opt_result_2: OptimalAllocationResult
+    opt_result_1_capped: OptimalAllocationResult
+    opt_result_2_capped: OptimalAllocationResult
+    sensitivity_de: SensitivityWaterfallResult
+    sensitivity_it: SensitivityWaterfallResult
+    years_de: YearsToTargetsResult
+    years_it: YearsToTargetsResult
+    stock_sweep: list[dict[str, float]] | None
+    heatmap_de: InflationCagrGrid
+    heatmap_it: InflationCagrGrid
+
+
+def _print_verbose_report(ctx: ReportContext) -> None:
+    config = ctx.config
+    args = ctx.args
+    future_monthly_income_value = ctx.future_monthly_income_value
+    target_annual_net_income = ctx.target_annual_net_income
+    projection_result = ctx.projection_result
+    stock_gain_fraction = ctx.stock_gain_fraction
+    scenario_1_result = ctx.scenario_1_result
+    scenario_2_result = ctx.scenario_2_result
+    projected_yield_scenario_1 = ctx.projected_yield_scenario_1
+    projected_yield_scenario_2 = ctx.projected_yield_scenario_2
+    cash_to_bonds_at_horizon_val = ctx.cash_to_bonds_at_horizon_val
+    estimated_final_cash = ctx.estimated_final_cash
+    inflation_rate = ctx.inflation_rate
+    stock_expected_yield = ctx.stock_expected_yield
+    bonds_yield = ctx.bonds_yield
+    withdrawal_rate = ctx.withdrawal_rate
+    stock_std = ctx.stock_std
+    inflation_std = ctx.inflation_std
+    target_success = ctx.target_success
+    current_stock_mo = ctx.current_stock_mo
+    current_bonds_mo = ctx.current_bonds_mo
+    mc1 = ctx.mc1
+    mc2 = ctx.mc2
+    cagr_stock_s1 = ctx.cagr_stock_s1
+    cagr_stock_s2 = ctx.cagr_stock_s2
+    grids_de = ctx.grids_de
+    grids_it = ctx.grids_it
+    bond_grid_de = ctx.bond_grid_de
+    bond_grid_it = ctx.bond_grid_it
+    combined_de = ctx.combined_de
+    combined_it = ctx.combined_it
+    cagr_income_s1 = ctx.cagr_income_s1
+    cagr_income_s2 = ctx.cagr_income_s2
+    ff_de = ctx.ff_de
+    ff_it = ctx.ff_it
+    opt_result_1 = ctx.opt_result_1
+    opt_result_2 = ctx.opt_result_2
+    stock_sweep = ctx.stock_sweep
+    heatmap_de = ctx.heatmap_de
+    heatmap_it = ctx.heatmap_it
     # ── Section 1: Assumptions & Target ───────────────────────────────────────
     _print_section(1, "ASSUMPTIONS & TARGET  —  DETERMINISTIC")
     current_portfolio_total = (
@@ -139,7 +229,7 @@ def _print_verbose_report(
     print_q1b_analysis(
         bond_grid_de, bond_grid_it,
         current_stock_mo, current_bonds_mo,
-        monthly_saving=config.annual_net_saving / 12,
+        monthly_saving=config.monthly_saving,
         target_success=target_success,
     )
 
@@ -152,7 +242,7 @@ def _print_verbose_report(
     print_plan_b_income(cagr_income_s1, cagr_income_s2, config)
     print_q2_analysis(
         grids_de, grids_it,
-        config.annual_net_saving / 12,
+        config.monthly_saving,
         target_success=target_success,
         verbose=True,
     )
@@ -184,7 +274,7 @@ def _print_verbose_report(
     )
 
 
-def main() -> None:
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Portfolio projection and Monte Carlo analysis",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -205,126 +295,124 @@ def main() -> None:
     parser.add_argument("--no-clear", action="store_true",
                         help="suppress terminal clear (used when called from main.py)")
     args, _ = parser.parse_known_args()
+    return args
 
-    if not args.no_clear:
-        clear_terminal()
+
+def _load_config() -> tuple[Config, str] | None:
+    """Load config.toml. On error, print a user-facing message and return None."""
     config_path = Path(__file__).with_name("config.toml")
-
     try:
         with config_path.open("rb") as f:
             config = Config.from_dict(tomllib.load(f))
-        config_toml_text = config_path.read_text()
+        return config, config_path.read_text()
     except FileNotFoundError:
         print(f"Config file not found: {config_path}")
-        return
     except KeyError as error:
         print(f"Missing required config key: {error}")
-        return
     except (ValueError, tomllib.TOMLDecodeError):
         print("Config values must be valid numbers in valid TOML.")
-        return
+    return None
 
-    # ── All computations ──────────────────────────────────────────────────────
-    try:
-        inflation_rate = config.expected_inflation_percent / 100
-        stock_expected_yield = config.expected_yearly_growth_stocks_percent / 100
-        bonds_yield = config.yield_bonds / 100
-        withdrawal_rate = config.withdrawal_percentage_stock / 100
-        target_success = config.mc_target_success_percent / 100
 
-        validate_config_inputs(
-            config=config,
-            stock_expected_yield=stock_expected_yield,
-            bonds_yield=bonds_yield,
-            withdrawal_rate=withdrawal_rate,
-        )
+def _compute_all(config: Config, args: argparse.Namespace) -> ReportContext:
+    """Run every projection / Monte Carlo / optimization needed for the report.
+    Raises ValueError on validation failures (caught by main())."""
+    inflation_rate = config.expected_inflation_percent / 100
+    stock_expected_yield = config.expected_yearly_growth_stocks_percent / 100
+    bonds_yield = config.yield_bonds / 100
+    withdrawal_rate = config.withdrawal_percentage_stock / 100
+    target_success = config.mc_target_success_percent / 100
 
-        future_monthly_income_value = calculate_future_income_value(
-            income_value=config.target_monthly_retirement_income,
-            years=config.years,
-            inflation_rate=inflation_rate,
-        )
-        target_annual_net_income = future_monthly_income_value * 12
-        projection_result = run_projection(config, stock_expected_yield)
+    validate_config_inputs(
+        config=config,
+        stock_expected_yield=stock_expected_yield,
+        bonds_yield=bonds_yield,
+        withdrawal_rate=withdrawal_rate,
+    )
 
-        gain_stock = max(
-            0.0, projection_result.final_stock_value - projection_result.cost_basis_stock
-        )
-        stock_gain_fraction = (
-            gain_stock / projection_result.final_stock_value
-            if projection_result.final_stock_value > 0 else 0.0
-        )
+    future_monthly_income_value = calculate_future_income_value(
+        income_value=config.target_monthly_retirement_income,
+        years=config.years,
+        inflation_rate=inflation_rate,
+    )
+    target_annual_net_income = future_monthly_income_value * 12
+    projection_result = run_projection(config, stock_expected_yield)
 
-        scenario_1_result = run_scenario(
-            name="SCENARIO 1 (DE)",
-            config=config,
-            future_monthly_income_value=future_monthly_income_value,
-            target_annual_net_income=target_annual_net_income,
-            stock_tax_rate=config.tax_rate,
-            bond_tax_rate=config.tax_rate,
-            stock_expected_yield=stock_expected_yield,
-            bonds_yield=bonds_yield,
-            withdrawal_rate=withdrawal_rate,
-            stock_gain_fraction=stock_gain_fraction,
-            stock_teilfreistellung=config.teilfreistellung,
-            annual_contribution_growth=config.annual_contribution_growth_percent / 100,
-        )
-        scenario_2_result = run_scenario(
-            name="SCENARIO 2 (IT)",
-            config=config,
-            future_monthly_income_value=future_monthly_income_value,
-            target_annual_net_income=target_annual_net_income,
-            stock_tax_rate=config.tax_rate,
-            bond_tax_rate=config.tax_rate_bond_italy,
-            stock_expected_yield=stock_expected_yield,
-            bonds_yield=bonds_yield,
-            withdrawal_rate=withdrawal_rate,
-            stock_gain_fraction=stock_gain_fraction,
-            stock_teilfreistellung=1.0,
-            annual_contribution_growth=config.annual_contribution_growth_percent / 100,
-        )
-        projected_yield_scenario_1 = calculate_projection_yield_for_scenario(
-            name="SCENARIO 1 (DE)",
-            projection=projection_result,
-            withdrawal_rate=withdrawal_rate,
-            bonds_yield=bonds_yield,
-            stock_tax_rate=config.tax_rate,
-            bond_tax_rate=config.tax_rate,
-            stock_teilfreistellung=config.teilfreistellung,
-        )
-        projected_yield_scenario_2 = calculate_projection_yield_for_scenario(
-            name="SCENARIO 2 (IT)",
-            projection=projection_result,
-            withdrawal_rate=withdrawal_rate,
-            bonds_yield=bonds_yield,
-            stock_tax_rate=config.tax_rate,
-            bond_tax_rate=config.tax_rate_bond_italy,
-            stock_teilfreistellung=1.0,
-        )
-    except ValueError as error:
-        print(error)
-        return
+    gain_stock = max(
+        0.0, projection_result.final_stock_value - projection_result.cost_basis_stock
+    )
+    stock_gain_fraction = (
+        gain_stock / projection_result.final_stock_value
+        if projection_result.final_stock_value > 0 else 0.0
+    )
 
-    _cash_pct = max(
+    scenario_1_result = run_scenario(
+        name="SCENARIO 1 (DE)",
+        config=config,
+        future_monthly_income_value=future_monthly_income_value,
+        target_annual_net_income=target_annual_net_income,
+        stock_tax_rate=config.tax_rate,
+        bond_tax_rate=config.tax_rate,
+        stock_expected_yield=stock_expected_yield,
+        bonds_yield=bonds_yield,
+        withdrawal_rate=withdrawal_rate,
+        stock_gain_fraction=stock_gain_fraction,
+        stock_teilfreistellung=config.teilfreistellung,
+        annual_contribution_growth=config.annual_contribution_growth_percent / 100,
+    )
+    scenario_2_result = run_scenario(
+        name="SCENARIO 2 (IT)",
+        config=config,
+        future_monthly_income_value=future_monthly_income_value,
+        target_annual_net_income=target_annual_net_income,
+        stock_tax_rate=config.tax_rate,
+        bond_tax_rate=config.tax_rate_bond_italy,
+        stock_expected_yield=stock_expected_yield,
+        bonds_yield=bonds_yield,
+        withdrawal_rate=withdrawal_rate,
+        stock_gain_fraction=stock_gain_fraction,
+        stock_teilfreistellung=1.0,
+        annual_contribution_growth=config.annual_contribution_growth_percent / 100,
+    )
+    projected_yield_scenario_1 = calculate_projection_yield_for_scenario(
+        name="SCENARIO 1 (DE)",
+        projection=projection_result,
+        withdrawal_rate=withdrawal_rate,
+        bonds_yield=bonds_yield,
+        stock_tax_rate=config.tax_rate,
+        bond_tax_rate=config.tax_rate,
+        stock_teilfreistellung=config.teilfreistellung,
+    )
+    projected_yield_scenario_2 = calculate_projection_yield_for_scenario(
+        name="SCENARIO 2 (IT)",
+        projection=projection_result,
+        withdrawal_rate=withdrawal_rate,
+        bonds_yield=bonds_yield,
+        stock_tax_rate=config.tax_rate,
+        bond_tax_rate=config.tax_rate_bond_italy,
+        stock_teilfreistellung=1.0,
+    )
+
+    cash_pct = max(
         0.0,
         1.0 - config.maximum_stock_monthly_investment_pct
         - config.maximum_bonds_monthly_investment_pct,
     )
-    _monthly_cash = config.annual_net_saving / 12 * _cash_pct
+    monthly_cash = config.monthly_saving * cash_pct
     cash_to_bonds_at_horizon_val = cash_converted_to_bonds_at_horizon(
         current_cash=config.current_cash,
         cash_rate=config.interest_on_cash_pa / 100,
         years=config.years,
         cash_reserve=config.cash_reserve_at_horizon,
-        monthly_contribution=_monthly_cash,
+        monthly_contribution=monthly_cash,
         contribution_growth_rate=config.annual_contribution_growth_percent / 100,
     )
     estimated_final_cash = cash_to_bonds_at_horizon_val + config.cash_reserve_at_horizon
 
     stock_std = config.mc_stock_return_std_percent / 100
     inflation_std = config.mc_inflation_std_percent / 100
-    current_stock_mo = config.annual_net_saving / 12 * config.maximum_stock_monthly_investment_pct
-    current_bonds_mo = config.annual_net_saving / 12 * config.maximum_bonds_monthly_investment_pct
+    current_stock_mo = config.monthly_saving * config.maximum_stock_monthly_investment_pct
+    current_bonds_mo = config.monthly_saving * config.maximum_bonds_monthly_investment_pct
     bonds_mo_de = scenario_1_result.required_monthly_bonds_contribution
     bonds_mo_it = scenario_2_result.required_monthly_bonds_contribution
 
@@ -448,12 +536,31 @@ def main() -> None:
     opt_result_1 = compute_optimal_allocation(
         config=config, scenario=scenario_1_result,
         stock_std=stock_std, inflation_std=inflation_std,
+        current_stocks_mo=current_stock_mo, current_bonds_mo=current_bonds_mo,
         step=config.optimize_grid_step, target_success=target_success,
     )
     opt_result_2 = compute_optimal_allocation(
         config=config, scenario=scenario_2_result,
         stock_std=stock_std, inflation_std=inflation_std,
+        current_stocks_mo=current_stock_mo, current_bonds_mo=current_bonds_mo,
         step=config.optimize_grid_step, target_success=target_success,
+    )
+
+    # Same optimization, but constrained to stocks/mo + bonds/mo ≤ full monthly saving
+    # (cash slice = residual = monthly_saving − stocks − bonds, can be 0).
+    opt_result_1_capped = compute_optimal_allocation(
+        config=config, scenario=scenario_1_result,
+        stock_std=stock_std, inflation_std=inflation_std,
+        current_stocks_mo=current_stock_mo, current_bonds_mo=current_bonds_mo,
+        step=config.optimize_grid_step, target_success=target_success,
+        budget_cap=config.monthly_saving,
+    )
+    opt_result_2_capped = compute_optimal_allocation(
+        config=config, scenario=scenario_2_result,
+        stock_std=stock_std, inflation_std=inflation_std,
+        current_stocks_mo=current_stock_mo, current_bonds_mo=current_bonds_mo,
+        step=config.optimize_grid_step, target_success=target_success,
+        budget_cap=config.monthly_saving,
     )
 
     heatmap_de = compute_inflation_cagr_grid(
@@ -477,91 +584,148 @@ def main() -> None:
             current_bonds_mo_1=bonds_mo_de, current_bonds_mo_2=bonds_mo_it,
         )
 
-    # ── Capture verbose report (always, for Claude context) ───────────────────
-    verbose_buf = io.StringIO()
-    with contextlib.redirect_stdout(verbose_buf):
-        _print_verbose_report(
-            config=config, args=args,
-            future_monthly_income_value=future_monthly_income_value,
-            target_annual_net_income=target_annual_net_income,
-            projection_result=projection_result,
-            stock_gain_fraction=stock_gain_fraction,
-            scenario_1_result=scenario_1_result,
-            scenario_2_result=scenario_2_result,
-            projected_yield_scenario_1=projected_yield_scenario_1,
-            projected_yield_scenario_2=projected_yield_scenario_2,
-            cash_to_bonds_at_horizon_val=cash_to_bonds_at_horizon_val,
-            estimated_final_cash=estimated_final_cash,
-            inflation_rate=inflation_rate,
-            stock_expected_yield=stock_expected_yield,
-            bonds_yield=bonds_yield,
-            withdrawal_rate=withdrawal_rate,
-            stock_std=stock_std, inflation_std=inflation_std,
-            target_success=target_success,
-            current_stock_mo=current_stock_mo, current_bonds_mo=current_bonds_mo,
-            bonds_mo_de=bonds_mo_de, bonds_mo_it=bonds_mo_it,
-            mc1=mc1, mc2=mc2,
-            cagr_stock_s1=cagr_stock_s1, cagr_stock_s2=cagr_stock_s2,
-            grids_de=grids_de, grids_it=grids_it,
-            bond_grid_de=bond_grid_de, bond_grid_it=bond_grid_it,
-            combined_de=combined_de, combined_it=combined_it,
-            cagr_income_s1=cagr_income_s1, cagr_income_s2=cagr_income_s2,
-            ff_de=ff_de, ff_it=ff_it,
-            opt_result_1=opt_result_1, opt_result_2=opt_result_2,
-            stock_sweep=stock_sweep,
-            heatmap_de=heatmap_de, heatmap_it=heatmap_it,
+    return ReportContext(
+        config=config, args=args,
+        future_monthly_income_value=future_monthly_income_value,
+        target_annual_net_income=target_annual_net_income,
+        projection_result=projection_result,
+        stock_gain_fraction=stock_gain_fraction,
+        scenario_1_result=scenario_1_result,
+        scenario_2_result=scenario_2_result,
+        projected_yield_scenario_1=projected_yield_scenario_1,
+        projected_yield_scenario_2=projected_yield_scenario_2,
+        cash_to_bonds_at_horizon_val=cash_to_bonds_at_horizon_val,
+        estimated_final_cash=estimated_final_cash,
+        inflation_rate=inflation_rate,
+        stock_expected_yield=stock_expected_yield,
+        bonds_yield=bonds_yield,
+        withdrawal_rate=withdrawal_rate,
+        stock_std=stock_std, inflation_std=inflation_std,
+        target_success=target_success,
+        current_stock_mo=current_stock_mo, current_bonds_mo=current_bonds_mo,
+        bonds_mo_de=bonds_mo_de, bonds_mo_it=bonds_mo_it,
+        mc1=mc1, mc2=mc2,
+        cagr_stock_s1=cagr_stock_s1, cagr_stock_s2=cagr_stock_s2,
+        grids_de=grids_de, grids_it=grids_it,
+        bond_grid_de=bond_grid_de, bond_grid_it=bond_grid_it,
+        combined_de=combined_de, combined_it=combined_it,
+        cagr_income_s1=cagr_income_s1, cagr_income_s2=cagr_income_s2,
+        ff_de=ff_de, ff_it=ff_it,
+        opt_result_1=opt_result_1, opt_result_2=opt_result_2,
+        opt_result_1_capped=opt_result_1_capped,
+        opt_result_2_capped=opt_result_2_capped,
+        sensitivity_de=sensitivity_de, sensitivity_it=sensitivity_it,
+        years_de=years_de, years_it=years_it,
+        stock_sweep=stock_sweep,
+        heatmap_de=heatmap_de, heatmap_it=heatmap_it,
+    )
+
+
+def _capture_stdout(render_fn) -> str:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        render_fn()
+    return buf.getvalue()
+
+
+def _render_all(ctx: ReportContext) -> tuple[str, str, str]:
+    """Build the three string outputs: verbose report, clean summary, compact takeaway."""
+    verbose_report = _capture_stdout(lambda: _print_verbose_report(ctx))
+
+    def _render_summary() -> None:
+        print_what_you_need_at_horizon(
+            ctx.config, ctx.scenario_1_result, ctx.scenario_2_result,
+            ctx.future_monthly_income_value, ctx.target_annual_net_income,
         )
-    verbose_report = verbose_buf.getvalue()
-
-    if args.verbose:
-        print(verbose_report, end="")
-
-    # ── Print clean summary (always) ───────────────────────────────────
-    summary_buf = io.StringIO()
-    with contextlib.redirect_stdout(summary_buf):
-        print_what_you_need_at_horizon(config, scenario_1_result, scenario_2_result,
-                         future_monthly_income_value, target_annual_net_income, )
-        print_current_situation_summary(config, projection_result, scenario_1_result, scenario_2_result,
-                         mc1, mc2, years_de, years_it)
-        print_how_to_get_there_portfolio(combined_de, combined_it, config, target_success,
-                          cagr_stock_s1, cagr_stock_s2)
-        print_how_to_get_there_income(grids_de, grids_it, cagr_income_s1, cagr_income_s2,
-                          config, target_success)
-        print_redeploy_current_assets(opt_result_1, opt_result_2, config)
+        print_current_situation_summary(
+            ctx.config, ctx.projection_result, ctx.scenario_1_result, ctx.scenario_2_result,
+            ctx.mc1, ctx.mc2, ctx.years_de, ctx.years_it,
+        )
+        print_how_to_get_there_portfolio(
+            ctx.combined_de, ctx.combined_it, ctx.config, ctx.target_success,
+            ctx.cagr_stock_s1, ctx.cagr_stock_s2,
+        )
+        print_how_to_get_there_income(
+            ctx.grids_de, ctx.grids_it, ctx.cagr_income_s1, ctx.cagr_income_s2,
+            ctx.config, ctx.target_success,
+        )
+        print_redeploy_current_assets(
+            ctx.opt_result_1, ctx.opt_result_2, ctx.config,
+            opt_result_1_capped=ctx.opt_result_1_capped,
+            opt_result_2_capped=ctx.opt_result_2_capped,
+        )
         print()
         print("SENSITIVITY — income success vs each input assumption")
         print()
-        print_sensitivity_waterfall(sensitivity_de, sensitivity_it)
-        if args.verbose:
+        print_sensitivity_waterfall(ctx.sensitivity_de, ctx.sensitivity_it)
+        if ctx.args.verbose:
             print("\n")
             print("JOINT SENSITIVITY — income success vs Inflation × Stock CAGR")
-            print_inflation_cagr_heatmap(heatmap_de, heatmap_it, target_success=target_success)
-    clean_summary = summary_buf.getvalue()
-    print(clean_summary, end="")
+            print_inflation_cagr_heatmap(ctx.heatmap_de, ctx.heatmap_it, target_success=ctx.target_success)
 
-    # ── Optional action plan via Claude ───────────────────────────────────────
+    def _render_takeaway() -> None:
+        print_takeaway(
+            config=ctx.config,
+            scenario_1=ctx.scenario_1_result, scenario_2=ctx.scenario_2_result,
+            mc1=ctx.mc1, mc2=ctx.mc2,
+            combined_de=ctx.combined_de, combined_it=ctx.combined_it,
+            grids_de=ctx.grids_de, grids_it=ctx.grids_it,
+            opt_result_1=ctx.opt_result_1, opt_result_2=ctx.opt_result_2,
+            opt_result_1_capped=ctx.opt_result_1_capped,
+            opt_result_2_capped=ctx.opt_result_2_capped,
+            sensitivity_de=ctx.sensitivity_de, sensitivity_it=ctx.sensitivity_it,
+            target_success=ctx.target_success,
+            future_monthly_income=ctx.future_monthly_income_value,
+            target_annual_net_income=ctx.target_annual_net_income,
+        )
+
+    return verbose_report, _capture_stdout(_render_summary), _capture_stdout(_render_takeaway)
+
+
+def _print_action_plan(config_toml_text: str, verbose_report: str, clean_summary: str) -> None:
+    try:
+        from agent import generate_action_plan
+        print("\n\n")
+        print(f"{'  ACTION PLAN':^70}")
+        print()
+        print("  Generating via Claude Sonnet — reading full report + summary...")
+        print()
+        plan = generate_action_plan(config_toml_text, verbose_report, clean_summary)
+        print(plan)
+        print()
+    except ImportError:
+        print("\n  Install the 'anthropic' package to use --action-plan.")
+    except Exception as error:
+        print(f"\n  Action plan failed: {error}")
+
+
+def main() -> tuple[float, float, float | None, int, str, str, str] | None:
+    args = _parse_args()
+    if not args.no_clear:
+        clear_terminal()
+
+    loaded = _load_config()
+    if loaded is None:
+        return None
+    config, config_toml_text = loaded
+
+    try:
+        ctx = _compute_all(config, args)
+    except ValueError as error:
+        print(error)
+        return None
+
+    verbose_report, clean_summary, takeaway = _render_all(ctx)
+    print(clean_summary if args.verbose else takeaway, end="")
+
     if args.action_plan:
-        try:
-            from agent import generate_action_plan
-            print("\n\n")
-            print(f"{'  ACTION PLAN':^70}")
-            print()
-            print("  Generating via Claude Sonnet — reading full report + summary...")
-            print()
-            plan = generate_action_plan(config_toml_text, verbose_report, clean_summary)
-            print(plan)
-            print()
-        except ImportError:
-            print("\n  Install the 'anthropic' package to use --action-plan.")
-        except Exception as error:
-            print(f"\n  Action plan failed: {error}")
+        _print_action_plan(config_toml_text, verbose_report, clean_summary)
 
-    # Bridge values for unified main.py
     tail_pct_int = int(round(100 - config.mc_target_success_percent))
     return (
-        mc2.final_portfolio_percentiles.get(50, 0.0),
-        mc2.final_portfolio_percentiles.get(tail_pct_int, 0.0),
-        cagr_stock_s2,
+        ctx.mc2.final_portfolio_percentiles.get(50, 0.0),
+        ctx.mc2.final_portfolio_percentiles.get(tail_pct_int, 0.0),
+        ctx.cagr_stock_s2,
         tail_pct_int,
         verbose_report,
         clean_summary,

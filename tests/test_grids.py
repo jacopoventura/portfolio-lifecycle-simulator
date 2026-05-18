@@ -269,14 +269,19 @@ class TestCombinedGrid:
 class TestComputeOptimalAllocation:
     @pytest.fixture(scope="class")
     def result_unachievable(self):
-        # With a very high target success and small portfolio, optimal will be None
+        # With a very high target success, small portfolio, AND a realistic monthly
+        # budget cap, no allocation in the grid can hit 99.9% — so optimal is None.
+        # (Without budget_cap, the optimizer would always find a feasible plan by
+        #  spending an unrealistic amount per month.)
         config = _cfg(optimize_grid_step=20_000.0)
         scenario = _scenario(config)
         return compute_optimal_allocation(
             config=config, scenario=scenario,
             stock_std=0.15, inflation_std=0.02,
+            current_stocks_mo=2_000.0, current_bonds_mo=1_000.0,
             target_success=0.999,
             seed=42, n_simulations=100,
+            budget_cap=config.monthly_saving,
         )
 
     @pytest.fixture(scope="class")
@@ -291,6 +296,7 @@ class TestComputeOptimalAllocation:
         return compute_optimal_allocation(
             config=config, scenario=scenario,
             stock_std=0.15, inflation_std=0.02,
+            current_stocks_mo=2_000.0, current_bonds_mo=1_000.0,
             target_success=0.50,
             seed=42, n_simulations=200,
         )
@@ -309,7 +315,7 @@ class TestComputeOptimalAllocation:
         assert result_achievable.optimal is not None
 
     def test_optimal_is_achievable(self, result_achievable):
-        assert result_achievable.optimal.achievable is True
+        assert bool(result_achievable.optimal.achievable)
 
     def test_optimal_has_finite_monthly_values(self, result_achievable):
         opt = result_achievable.optimal

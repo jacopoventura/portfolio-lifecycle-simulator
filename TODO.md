@@ -3,7 +3,6 @@ remember that the goal of all of this project is to understand if I am on track 
 This includes understanding if the target portfolio can survive during the decumulation phase, if the historical market performance match the 
 expected cagr used for portfolio calculation and if I can find a ET>F portfolio to reach this
 
-
 REPORTING / FI-VERDICT FIXES (ranked by FI-impact)
 1. Unify the required-portfolio definition. Section 1 uses the asset-split formula (€2.07M IT) and prints "WARNING — financial plan must be
    revised" at 76% success; Plan Verdict uses the income formula (€1.96M) and prints "✓ ON TRACK". Same inputs, contradictory verdicts.
