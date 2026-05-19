@@ -27,12 +27,38 @@ import io
 import sys
 from pathlib import Path
 
-from models import DecumulationSummary, PlanVerdictSummary
+from models import CagrRealismSnapshot, DecumulationSummary, PlanVerdictSummary
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 _CONTEXT_FILE = Path("historical_data") / "last_run_context.txt"
+_HISTORY_FILE = Path("historical_data") / "run_history.csv"
+_HISTORY_HEADER = "date,required_cagr,joint_P,p50\n"
+
+
+def _append_history(
+    required_cagr: float | None,
+    joint_P: float | None,
+    p50: float,
+) -> None:
+    """Append one row to run_history.csv so drift over time is visible.
+    Values stored as decimals (e.g. 0.042 for 4.2%); empty string when None."""
+    from datetime import date
+    _HISTORY_FILE.parent.mkdir(exist_ok=True)
+    fresh = not _HISTORY_FILE.exists()
+    def _fmt(v: float | None, ndigits: int) -> str:
+        return f"{v:.{ndigits}f}" if v is not None else ""
+    row = (
+        f"{date.today().isoformat()},"
+        f"{_fmt(required_cagr, 5)},"
+        f"{_fmt(joint_P, 4)},"
+        f"{_fmt(p50 if p50 > 0 else None, 0)}\n"
+    )
+    with _HISTORY_FILE.open("a") as f:
+        if fresh:
+            f.write(_HISTORY_HEADER)
+        f.write(row)
 
 
 def _fmt_eur(v: float | None) -> str:
@@ -48,6 +74,7 @@ def print_plan_snapshot(
     decum_summary: DecumulationSummary | None,
     required_cagr: float | None,
     p50: float,
+    realism: CagrRealismSnapshot | None = None,
 ) -> None:
     W = 70
     print()
@@ -73,6 +100,18 @@ def print_plan_snapshot(
         print(f"    MC P50 at horizon    : €{p50:,.0f}")
     print(f"    Required stock CAGR  : {req_cagr_str}  (IT scenario)")
     print(f"    Verdict              : {on_track}")
+
+    # Realism check — does the world produce returns close to what we need?
+    if realism is not None:
+        cape  = _fmt_pct(realism.cape_nominal_cagr)
+        sp50  = _fmt_pct(realism.sp500_10y_rolling_eur_p50)
+        sp5   = _fmt_pct(realism.sp500_10y_rolling_eur_p5)
+        ep50  = _fmt_pct(realism.optimised_etf_p50)
+        ep5   = _fmt_pct(realism.optimised_etf_p5)
+        print(f"    Realism check        : need {req_cagr_str}"
+              f"  │ CAPE-fwd {cape}"
+              f"  │ S&P 10y EUR P50/P5 {sp50}/{sp5}"
+              f"  │ ETF P50/P5 {ep50}/{ep5}")
     print()
 
     # Prefer the joint rate reported in the CAGR Plan Verdict (chained MC sample
@@ -150,6 +189,7 @@ def _save_context(
     required_cagr: float | None,
     decum_summary: DecumulationSummary | None,
     plan_verdict: PlanVerdictSummary | None,
+    realism: CagrRealismSnapshot | None = None,
 ) -> None:
     import json
     from dataclasses import asdict
@@ -162,13 +202,17 @@ def _save_context(
     payload = {
         "decum_summary": asdict(decum_summary) if decum_summary else None,
         "plan_verdict":  asdict(plan_verdict)  if plan_verdict  else None,
+        "realism":       asdict(realism)       if realism       else None,
     }
     _SUMMARIES_FILE.write_text(json.dumps(payload, indent=2))
 
 
-def _load_context() -> tuple[str, str, str, float | None, DecumulationSummary | None, PlanVerdictSummary | None]:
+def _load_context() -> tuple[
+    str, str, str, float | None,
+    DecumulationSummary | None, PlanVerdictSummary | None, CagrRealismSnapshot | None,
+]:
     if not _CONTEXT_FILE.exists():
-        return "", "", "", None, None, None
+        return "", "", "", None, None, None, None
     text = _CONTEXT_FILE.read_text()
     required_cagr = None
     if text.startswith("REQUIRED_CAGR_IT="):
@@ -181,6 +225,7 @@ def _load_context() -> tuple[str, str, str, float | None, DecumulationSummary | 
 
     decum_summary: DecumulationSummary | None = None
     plan_verdict:  PlanVerdictSummary  | None = None
+    realism:       CagrRealismSnapshot | None = None
     if _SUMMARIES_FILE.exists():
         import json
         payload = json.loads(_SUMMARIES_FILE.read_text())
@@ -188,17 +233,25 @@ def _load_context() -> tuple[str, str, str, float | None, DecumulationSummary | 
             decum_summary = DecumulationSummary(**payload["decum_summary"])
         if payload.get("plan_verdict"):
             plan_verdict = PlanVerdictSummary(**payload["plan_verdict"])
-    return accum, decum, cagr, required_cagr, decum_summary, plan_verdict
+        if payload.get("realism"):
+            realism = CagrRealismSnapshot(**payload["realism"])
+    return accum, decum, cagr, required_cagr, decum_summary, plan_verdict, realism
 
 
 # ── Sections ──────────────────────────────────────────────────────────────────
 
-def run_accum(verbose: bool = False) -> tuple[str, float, float, float | None, int]:
+def _planning_cagr_argv(planning_cagr: str | None) -> list[str]:
+    """Return ['--cagr', X] if set, else []. Used to propagate to sub-scripts."""
+    return ["--cagr", planning_cagr] if planning_cagr else []
+
+
+def run_accum(verbose: bool = False, planning_cagr: str | None = None
+              ) -> tuple[str, float, float, float | None, int]:
     """Run accumulation section. Returns (report_text, p50, tail, required_cagr, tail_pct)."""
     import main_portfolio_projection as m
 
     _banner(1, "ACCUMULATION — target portfolio, contributions, financial freedom")
-    argv = ["--no-clear"]
+    argv = ["--no-clear", *_planning_cagr_argv(planning_cagr)]
     if verbose:
         argv.append("--verbose")
     text, result = _capture(m.main, argv)
@@ -210,7 +263,8 @@ def run_accum(verbose: bool = False) -> tuple[str, float, float, float | None, i
     return text, p50, tail, required_cagr, tail_pct
 
 
-def run_decum(p50: float, tail: float, tail_pct: int) -> tuple[str, DecumulationSummary | None]:
+def run_decum(p50: float, tail: float, tail_pct: int,
+              planning_cagr: str | None = None) -> tuple[str, DecumulationSummary | None]:
     """Run decumulation section. Returns (report text, typed summary)."""
     import main_decumulation as m
 
@@ -221,29 +275,32 @@ def run_decum(p50: float, tail: float, tail_pct: int) -> tuple[str, Decumulation
             p50_override=p50 if p50 > 0 else None,
             tail_override=tail if tail > 0 else None,
         ),
-        ["--no-clear", "--tail-pct", str(tail_pct)],
+        ["--no-clear", "--tail-pct", str(tail_pct), *_planning_cagr_argv(planning_cagr)],
     )
     return text, summary if isinstance(summary, DecumulationSummary) else None
 
 
-def run_cagr() -> tuple[str, object, PlanVerdictSummary | None]:
+def run_cagr(planning_cagr: str | None = None
+             ) -> tuple[str, object, CagrRealismSnapshot | None]:
     """Run CAGR / instrument section.
 
-    Returns (agent_summary_text, OptimalPortfolioResult | None, PlanVerdictSummary | None).
+    Returns (agent_summary_text, OptimalPortfolioResult | None, CagrRealismSnapshot | None).
     The text is trimmed to the AGENT SUMMARY section to keep agent context compact.
     """
     import main_cagr_analysis as m
 
     _banner(3, "INSTRUMENTS — historical CAGR, volatility, correlation + optimiser")
-    text, result = _capture(m.main, ["--no-clear"])
+    text, result = _capture(m.main, ["--no-clear", *_planning_cagr_argv(planning_cagr)])
 
-    # result is (list[TickerResult], OptimalPortfolioResult | None, PlanVerdictSummary | None)
+    # result is (list[TickerResult], OptimalPortfolioResult | None, CagrRealismSnapshot | None)
     opt_result = result[1] if isinstance(result, tuple) and len(result) > 1 else None
-    plan_verdict = result[2] if isinstance(result, tuple) and len(result) > 2 else None
+    realism    = result[2] if isinstance(result, tuple) and len(result) > 2 else None
+    if not isinstance(realism, CagrRealismSnapshot):
+        realism = None
 
     marker = "AGENT SUMMARY"
     agent_text = text[text.index(marker):] if marker in text else text
-    return agent_text, opt_result, plan_verdict
+    return agent_text, opt_result, realism
 
 
 def run_agent(
@@ -296,33 +353,44 @@ def main() -> None:
                         help="run AI agent (section 4) after sections 1–3")
     parser.add_argument("--verbose", action="store_true",
                         help="pass --verbose to accumulation section")
+    parser.add_argument("--cagr", default=None,
+                        help="override stock CAGR for all sections "
+                             "(accepts 4, 4.0, 0.04, '4%%'); propagated to sub-scripts")
     args = parser.parse_args()
 
     start = _SECTIONS.index(args.start_from)
+    planning_cagr = args.cagr  # string or None — propagated verbatim
 
     # Load cached context for sections we're skipping
-    accum_text, decum_text, cagr_text, required_cagr, decum_summary, plan_verdict = _load_context()
+    accum_text, decum_text, cagr_text, required_cagr, decum_summary, plan_verdict, realism = _load_context()
     p50 = tail = 0.0
     tail_pct = 3
     config_toml = Path("config.toml").read_text() if Path("config.toml").exists() else ""
 
     # Section 1: Accumulation
     if start <= _SECTIONS.index("accum"):
-        accum_text, p50, tail, required_cagr, tail_pct = run_accum(verbose=args.verbose)
+        accum_text, p50, tail, required_cagr, tail_pct = run_accum(
+            verbose=args.verbose, planning_cagr=planning_cagr,
+        )
 
     # Section 2: Decumulation
     if start <= _SECTIONS.index("decum"):
-        decum_text, decum_summary = run_decum(p50, tail, tail_pct)
+        decum_text, decum_summary = run_decum(p50, tail, tail_pct,
+                                              planning_cagr=planning_cagr)
 
     # Section 3: CAGR + optimiser
     if start <= _SECTIONS.index("cagr"):
-        cagr_text, _opt, plan_verdict = run_cagr()
+        cagr_text, _opt, realism = run_cagr(planning_cagr=planning_cagr)
 
     # Cache context for --from agent re-runs
-    _save_context(accum_text, decum_text, cagr_text, required_cagr, decum_summary, plan_verdict)
+    _save_context(accum_text, decum_text, cagr_text, required_cagr, decum_summary, plan_verdict, realism)
 
     # Plan snapshot — compact summary printed before agent
-    print_plan_snapshot(plan_verdict, decum_summary, required_cagr, p50)
+    print_plan_snapshot(plan_verdict, decum_summary, required_cagr, p50, realism=realism)
+
+    # Drift log — one row per full pipeline run
+    joint_P = decum_summary.joint_survival_chained if decum_summary is not None else None
+    _append_history(required_cagr=required_cagr, joint_P=joint_P, p50=p50)
 
     # Section 4: AI Agent — only when explicitly requested
     if args.agent or args.start_from == "agent":

@@ -50,10 +50,23 @@ class Config:
     mc_stock_return_ar1_phi: float = 0.0      # AR(1) mean reversion (negative = post-crash recovery)
     mc_stock_mean_uncertainty: float = 0.0    # prior std on stock CAGR (epistemic uncertainty)
     mc_stock_vol_uncertainty: float = 0.0     # prior std on stock volatility (epistemic uncertainty)
+    # Optional CAGR override used for projection/MC planning. Stored as decimal
+    # (0.04 = 4%) so the property can return it directly. None falls back to the
+    # config "expected_yearly_growth_stocks_percent" baseline. Set this when the
+    # CAGR realism check flags the baseline as "optimistic" vs CAPE.
+    planning_cagr_override: float | None = None
 
     @property
     def monthly_saving(self) -> float:
         return self.annual_net_saving / 12
+
+    @property
+    def planning_cagr(self) -> float:
+        """Stock CAGR used for projection / MC planning. Equals the override if
+        set (incl. zero or negative), otherwise the config baseline."""
+        if self.planning_cagr_override is not None:
+            return self.planning_cagr_override
+        return self.expected_yearly_growth_stocks_percent / 100.0
 
     @classmethod
     def from_dict(cls, config: dict[str, object]) -> "Config":
@@ -115,7 +128,24 @@ class Config:
             mc_stock_return_ar1_phi=float(config.get("mc_stock_return_ar1_phi", 0.0)),
             mc_stock_mean_uncertainty=float(config.get("mc_stock_mean_uncertainty", 0.0)),
             mc_stock_vol_uncertainty=float(config.get("mc_stock_vol_uncertainty", 0.0)),
+            # planning_cagr_override is CLI-only (per-run) — never read from config.toml
         )
+
+    @staticmethod
+    def parse_planning_cagr(raw: object) -> float | None:
+        """Parse a CLI --cagr argument. Accepts:
+          0.04, 4.0, "4.0", "4%", "" / None → returns decimal float, or None.
+        Values > 1 are interpreted as percent (4.0 → 0.04); ≤ 1 as already decimal."""
+        if raw is None or raw == "":
+            return None
+        try:
+            s = str(raw).strip().rstrip("%")
+            if not s:
+                return None
+            v = float(s)
+        except (TypeError, ValueError):
+            return None
+        return v / 100.0 if v > 1.0 else v
 
 
 @dataclass
@@ -451,6 +481,17 @@ class PlanVerdictSummary:
     gap_config: float                        # projected_config − required (positive = surplus)
     on_track: bool                           # gap_config >= 0
     joint_survival_rate: float | None        # chained MC P(accumulate AND survive), if computed
+
+
+@dataclass
+class CagrRealismSnapshot:
+    """One-row realism check: does the world produce returns close to what we need?
+    All values nominal, EUR. None where data is insufficient."""
+    cape_nominal_cagr: float | None          # CAPE-implied forward CAGR
+    sp500_10y_rolling_eur_p50: float | None  # P50 of rolling 10y EUR CAGRs (1988–today)
+    sp500_10y_rolling_eur_p5:  float | None  # P5 of same — entry-point bad-luck floor
+    optimised_etf_p50: float | None          # selected strategy's rolling 10y P50
+    optimised_etf_p5:  float | None          # selected strategy's rolling 10y P5 (None if history < 10y)
 
 
 @dataclass

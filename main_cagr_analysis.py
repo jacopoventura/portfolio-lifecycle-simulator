@@ -342,12 +342,13 @@ def fetch_and_compute(
 
     if currency != "EUR" and currency not in FX_TICKERS:
         known = _KNOWN_CURRENCIES.get(ticker)
-        if known and known != currency:
+        if known and known != currency and (known == "EUR" or known in FX_TICKERS):
             print(f"  [!] {ticker}: Yahoo returned currency '{currency}', expected '{known}' — using known value")
             currency = known
         else:
-            print(f"  [!] {ticker}: unrecognised currency '{currency}' — treating as EUR (CAGR may be wrong)")
-            currency = "EUR"
+            # No safe conversion path: refuse rather than silently mislabel as EUR.
+            print(f"  [!] {ticker}: unsupported currency '{currency}' (no FX series, no known fallback) — skipping")
+            return None, "failed", None
 
     raw_prices = df["Close"].dropna()
     if len(raw_prices) < 2:
@@ -498,136 +499,6 @@ def _short_ticker(ticker: str) -> str:
     return ticker.split(".")[0]
 
 
-def print_summary_table(results: list[TickerResult]) -> None:
-    labels = [_window_label(y) for y in WINDOW_YEARS]
-    tick_w = 8
-    dt_w = 8    # start / end date columns
-    cw = 7      # CAGR columns
-    av_w = 7    # Ann. σ
-    ref_cw = 8  # min / max / std of reference window
-
-    window_block = "".join(f"-{'-' * cw}-+" for _ in labels)
-    # fixed chars in sep excluding name_w: part1 + dates(22) + windows + av(10) + refs(44)
-    name_w = _name_col_width(
-        (2+tick_w+3+5) + 22 + len(WINDOW_YEARS) * (1 + cw + 2) + 10 + 44
-    )
-    sep = (
-        f"+-{'-' * tick_w}-+-{'-' * name_w}-+--+"
-        f"-{'-' * dt_w}-+-{'-' * dt_w}-+"
-        f"{window_block}"
-        f"-{'-' * av_w}-+"
-        f"-{'-' * ref_cw}-+-{'-' * ref_cw}-+-{'-' * ref_cw}-+-{'-' * ref_cw}-+"
-    )
-
-    ref_label = _window_label(SORT_BY_WINDOW)
-    header_windows = "".join(f" {label:>{cw}} |" for label in labels)
-    hdr = (
-        f"| {'Ticker':<{tick_w}} | {'Name':<{name_w}} |EU"
-        f"| {'Start':>{dt_w}} | {'End':>{dt_w}} |"
-        f"{header_windows}"
-        f" {'σ-5y':>{av_w}} |"
-        f" {'P5-' + ref_label:>{ref_cw}} | {'Std' + ref_label:>{ref_cw}} | {'Min' + ref_label:>{ref_cw}} | {'Max' + ref_label:>{ref_cw}} |"
-    )
-
-    # Fixed-width blank prefix for the n_windows sub-row
-    blank_prefix = (
-        f"| {'':>{tick_w}} | {'':>{name_w}} |  "
-        f"| {'':>{dt_w}} | {'':>{dt_w}} |"
-    )
-    blank_suffix = f" {'':>{av_w}} | {'':>{ref_cw}} | {'':>{ref_cw}} | {'':>{ref_cw}} | {'':>{ref_cw}} |"
-
-    print(sep)
-    print(hdr)
-    print(sep)
-
-    def print_row(r: TickerResult) -> None:
-        eu_flag = "✓ " if r.eu_available else "  "
-        row_w = "".join(
-            f" {_pct(r.windows[y].cagr_mean) if y in r.windows else 'n/a':>{cw}} |"
-            for y in WINDOW_YEARS
-        )
-        ref_w = r.windows.get(SORT_BY_WINDOW)
-        p05_s = _pct(ref_w.cagr_p05) if ref_w else "n/a"
-        std_s = _pct(ref_w.cagr_std) if ref_w else "n/a"
-        min_s = _pct(ref_w.cagr_min) if ref_w else "n/a"
-        max_s = _pct(ref_w.cagr_max) if ref_w else "n/a"
-        print(
-            f"| {_short_ticker(r.ticker):<{tick_w}} | {r.name[:name_w]:<{name_w}} |{eu_flag}"
-            f"| {r.data_from.strftime('%Y-%m'):>{dt_w}} | {r.data_to.strftime('%Y-%m'):>{dt_w}} |"
-            f"{row_w}"
-            f" {_pct(r.ann_vol_5y_eur):>{av_w}} |"
-            f" {p05_s:>{ref_cw}} | {std_s:>{ref_cw}} | {min_s:>{ref_cw}} | {max_s:>{ref_cw}} |"
-        )
-        # Sub-row: n_windows per window (omit for "max" window — always 1)
-        row_n = "".join(
-            f" {('n=' + str(r.windows[y].n_windows)) if (y in r.windows and r.windows[y].n_windows > 0 and y is not None) else '':>{cw}} |"
-            for y in WINDOW_YEARS
-        )
-        print(f"{blank_prefix}{row_n}{blank_suffix}")
-
-    for r in sorted(results, key=_sort_key):
-        print_row(r)
-    print(sep)
-
-
-def print_detail_table(results: list[TickerResult], years: int | None) -> None:
-    label = _window_label(years)
-    valid = [
-        (r, r.windows[years])
-        for r in results
-        if years in r.windows and r.windows[years].cagr_mean is not None
-    ]
-    valid.sort(key=lambda x: -(x[1].cagr_mean or 0))
-
-    tick_w = 8
-    cw = 9
-    is_single = (years is None)
-    # fixed chars in sep excluding name_w:
-    #   single:     part1(18) + from-col(12) + 2 cw cols(25) = 55
-    #   non-single: part1(18) + 7 cw cols(84) + windows-col(11) = 113
-    name_w = _name_col_width(53 if is_single else 113)
-
-    if is_single:
-        sep = f"+-{'-' * tick_w}-+-{'-' * name_w}-+--+-{'-' * 8}-+-{'-' * cw}-+-{'-' * cw}-+"
-        hdr = (
-            f"| {'Ticker':<{tick_w}} | {'Name':<{name_w}} |EU"
-            f"| {'From':>8} | {'CAGR (EUR)':>{cw}} | {'Ann. σ':>{cw}} |"
-        )
-    else:
-        sep = (
-            f"+-{'-' * tick_w}-+-{'-' * name_w}-+--+"
-            f"-{'-' * cw}-+-{'-' * cw}-+-{'-' * cw}-+-{'-' * cw}-+-{'-' * cw}-+-{'-' * cw}-+-{'-' * cw}-+"
-            f"-{'-' * 8}-+"
-        )
-        hdr = (
-            f"| {'Ticker':<{tick_w}} | {'Name':<{name_w}} |EU"
-            f"| {'Mean CAGR':>{cw}} | {'P5 CAGR':>{cw}} | {'P25 CAGR':>{cw}} | {'Std CAGR':>{cw}} | {'Min CAGR':>{cw}} | {'Max CAGR':>{cw}} | {'Ann. σ':>{cw}} |"
-            f" {'Windows':>8} |"
-        )
-
-    print(f"\n  Window: {label.upper()}")
-    print(sep)
-    print(hdr)
-    print(sep)
-
-    for r, w in valid:
-        eu_flag = "✓ " if r.eu_available else "  "
-        if is_single:
-            print(
-                f"| {_short_ticker(r.ticker):<{tick_w}} | {r.name[:name_w]:<{name_w}} |{eu_flag}"
-                f"| {r.data_from.strftime('%Y-%m'):>8} | {_pct(w.cagr_mean):>{cw}} | {_pct(r.ann_vol_eur):>{cw}} |"
-            )
-        else:
-            print(
-                f"| {_short_ticker(r.ticker):<{tick_w}} | {r.name[:name_w]:<{name_w}} |{eu_flag}"
-                f"| {_pct(w.cagr_mean):>{cw}} | {_pct(w.cagr_p05):>{cw}} | {_pct(w.cagr_p25):>{cw}} | {_pct(w.cagr_std):>{cw}} | {_pct(w.cagr_min):>{cw}} | {_pct(w.cagr_max):>{cw}} | {_pct(r.ann_vol_eur):>{cw}} |"
-                f" {w.n_windows:>8,} |"
-            )
-    print(sep)
-    if not valid:
-        print("  No tickers with sufficient data for this window.")
-
-
 # ── Final summary ─────────────────────────────────────────────────────────────
 
 def print_final_summary(results: list[TickerResult]) -> None:
@@ -644,9 +515,9 @@ def print_final_summary(results: list[TickerResult]) -> None:
     mdd_w   = 7   # max drawdown
     ratio_w = 6   # Sharpe / Sortino / Calmar
     wr_w    = 6   # win rate for reference window
-    # fixed chars in sep excluding name_w: 30+29+20+27+10+27+9 = 152
+    # fixed chars in sep excluding name_w: 27+29+20+27+10+27+9 = 149
     name_w = _name_col_width(
-        (2+rk_w+3+tick_w+3+6+yr_w+2) +
+        (2+rk_w+3+tick_w+3+3+yr_w+2) +
         (1+cw+3+cw+3+cons_w+2) +
         (1+cw+3+cw+2) +
         (1+av_w+3+av_w+3+av_w+2) +
@@ -656,7 +527,7 @@ def print_final_summary(results: list[TickerResult]) -> None:
     )
 
     sep = (
-        f"+-{'-'*rk_w}-+-{'-'*tick_w}-+-{'-'*name_w}-+--+-{'-'*yr_w}-+"
+        f"+-{'-'*rk_w}-+-{'-'*tick_w}-+-{'-'*name_w}-+-{'-'*yr_w}-+"
         f"-{'-'*cw}-+-{'-'*cw}-+-{'-'*cons_w}-+"
         f"-{'-'*cw}-+-{'-'*cw}-+"
         f"-{'-'*av_w}-+-{'-'*av_w}-+-{'-'*av_w}-+"
@@ -665,7 +536,7 @@ def print_final_summary(results: list[TickerResult]) -> None:
         f"-{'-'*wr_w}-+"
     )
     hdr = (
-        f"| {'#':>{rk_w}} | {'Ticker':<{tick_w}} | {'Name':<{name_w}} |EU"
+        f"| {'#':>{rk_w}} | {'Ticker':<{tick_w}} | {'Name':<{name_w}} "
         f"| {'From':>{yr_w}} |"
         f" {ref_label+' avg':>{cw}} | {'P5-'+ref_label:>{cw}} | {'Cons.':>{cons_w}} |"
         f" {'5y avg':>{cw}} | {'All-time':>{cw}} |"
@@ -684,7 +555,6 @@ def print_final_summary(results: list[TickerResult]) -> None:
     all_results = sorted(results, key=_sort_key)
 
     def _row(rank: int, r: TickerResult) -> None:
-        eu_flag = "✓ " if r.eu_available else "  "
         w_ref = r.windows.get(ref)
         w_5y  = r.windows.get(5)
         w_max = r.windows.get(None)
@@ -697,7 +567,7 @@ def print_final_summary(results: list[TickerResult]) -> None:
         )
 
         print(
-            f"| {rank:>{rk_w}} | {_short_ticker(r.ticker):<{tick_w}} | {r.name[:name_w]:<{name_w}} |{eu_flag}"
+            f"| {rank:>{rk_w}} | {_short_ticker(r.ticker):<{tick_w}} | {r.name[:name_w]:<{name_w}} "
             f"| {r.data_from.year:>{yr_w}} |"
             f" {_pct(w_ref.cagr_mean if w_ref else None):>{cw}} |"
             f" {_pct(w_ref.cagr_p05  if w_ref else None):>{cw}} |"
@@ -777,55 +647,6 @@ def print_correlation_matrix(results: list[TickerResult], prices: dict[str, pd.S
         print(row)
 
 
-# ── Agent summary ─────────────────────────────────────────────────────────────
-
-def print_analysis_notes(results: list[TickerResult]) -> None:
-    """Metric guide and key observations, printed after the final summary table."""
-    ref_label = _window_label(SORT_BY_WINDOW)
-    all_r = sorted(results, key=_sort_key)
-
-    print("  METRIC GUIDE:")
-    print(f"  P5-10y  : conservative return input for Monte Carlo (5th-pct of rolling {ref_label} CAGRs)")
-    print("  σ5y     : forward-looking vol input for Monte Carlo (recent 5-year regime; crypto at 365d/yr)")
-    print("  Cons    : mean÷std of rolling CAGRs — how stable is the return regardless of entry date")
-    print("  MDD     : peak-to-trough drawdown — proxy for sequence-of-returns risk at decumulation")
-    print("  Sortino : risk-adjusted return penalising only downside vol — preferred over Sharpe for SORR")
-    print("  Calmar  : all-time CAGR / |MDD| — higher = better return per unit of worst drawdown")
-    print(f"  WR-10y  : % of rolling {ref_label} windows with CAGR > 0 — historical win probability")
-    print("  Corr    : see correlation matrix above — corr > 0.95 = redundant pair, pick one")
-    print()
-
-    print("  KEY OBSERVATIONS FOR COMBINATION SELECTION:")
-
-    def _cons_val(r: TickerResult) -> float | None:
-        w = r.windows.get(SORT_BY_WINDOW)
-        if w and w.cagr_mean is not None and w.cagr_std is not None and w.cagr_std > 0:
-            return w.cagr_mean / w.cagr_std
-        return None
-
-    def _best(lst: list[TickerResult], key, label: str, fmt) -> None:
-        valid = [(r, key(r)) for r in lst if key(r) is not None]
-        if valid:
-            r, v = max(valid, key=lambda x: x[1])
-            print(f"  - {label:<28}: {_short_ticker(r.ticker)}  ({fmt(v)})")
-
-    def _worst(lst: list[TickerResult], key, label: str, fmt) -> None:
-        valid = [(r, key(r)) for r in lst if key(r) is not None]
-        if valid:
-            r, v = min(valid, key=lambda x: x[1])
-            print(f"  - {label:<28}: {_short_ticker(r.ticker)}  ({fmt(v)})")
-
-    _best(all_r, lambda r: r.sharpe_eur,   "Best Sharpe",       lambda v: f"{v:.2f}")
-    _best(all_r, lambda r: r.sortino_eur,  "Best Sortino",      lambda v: f"{v:.2f}")
-    _best(all_r, lambda r: r.calmar_eur,   "Best Calmar",       lambda v: f"{v:.2f}")
-    _best(all_r, _cons_val,                "Most consistent",   lambda v: f"Cons={v:.1f}")
-    _best(all_r, lambda r: (r.windows[SORT_BY_WINDOW].cagr_p05
-                            if SORT_BY_WINDOW in r.windows else None),
-          f"Best P5-{ref_label}",          _pct)
-    _worst(all_r, lambda r: r.ann_vol_5y_eur,    "Lowest σ-5y",    _pct)
-    _worst(all_r, lambda r: r.max_drawdown_eur,  "Shallowest MDD", _pct)
-
-
 # ── Portfolio Optimiser ───────────────────────────────────────────────────────
 
 @dataclass
@@ -883,7 +704,7 @@ def _portfolio_stats(
     annual_rets = (1 + ret_series).groupby(ret_series.index.year).prod() - 1
     annual_ret_std = float(annual_rets.std(ddof=1)) if len(annual_rets) >= 3 else None
 
-    cutoff = dates[-1] - pd.Timedelta(days=5 * 365)
+    cutoff = dates[-1] - pd.Timedelta(days=5 * 365.25)
     recent_ret = port_ret[dates > cutoff]
     vol_src = recent_ret if len(recent_ret) > 20 else port_ret
     vol_5y = float(np.std(vol_src, ddof=1) * np.sqrt(trading_days_per_year))
@@ -917,8 +738,24 @@ def _run_optimization(
     best_w = np.ones(n) / n
     best_val = np.inf
 
+    # Extract the scalar upper box-bound so restart points start feasible w.r.t.
+    # max_weight_per_ticker (SLSQP can recover but converges faster from feasible).
+    _ub = getattr(bounds, "ub", None)
+    ub_scalar = float(np.atleast_1d(_ub).max()) if _ub is not None else 1.0
+
     for _ in range(n_restarts):
         w0 = rng.dirichlet(np.ones(n))
+        # Clip-and-redistribute any component above the box bound onto remaining
+        # capacity; bails if the cap is infeasible (sum of caps < 1).
+        for _ in range(5):
+            if w0.max() <= ub_scalar + 1e-9:
+                break
+            excess = (w0 - ub_scalar).clip(min=0).sum()
+            w0 = np.minimum(w0, ub_scalar)
+            room = (ub_scalar - w0).clip(min=0)
+            if room.sum() <= 1e-9:
+                break
+            w0 = w0 + excess * room / room.sum()
         try:
             res = minimize(
                 objective_fn, w0, method="SLSQP",
@@ -962,6 +799,7 @@ def compute_optimal_portfolio(
     selected_strategy: str | None = None,
     use_bayesian_shrinkage: bool = False,
     shrink_mean_intensity: float = 0.5,
+    seed: int = 42,
 ) -> OptimalPortfolioResult | None:
     """Find optimal portfolio weights via Max-Sortino, Max-Sharpe, Min-Variance, and Equal Weight.
 
@@ -1013,7 +851,7 @@ def compute_optimal_portfolio(
     # Precompute: special-cap ticker indices and 5-year recent mask
     qqq_idx  = eligible.index("QQQ") if "QQQ" in eligible else -1
     gold_idxs = [i for i, t in enumerate(eligible) if t in GOLD_TICKERS]
-    cutoff_5y   = dates[-1] - pd.Timedelta(days=5 * 365)
+    cutoff_5y   = dates[-1] - pd.Timedelta(days=5 * 365.25)
     recent_mask = np.asarray(dates > cutoff_5y)  # numpy bool array — used in Sharpe obj
 
     # ── Constraints ───────────────────────────────────────────────────────────
@@ -1035,9 +873,10 @@ def compute_optimal_portfolio(
     daily_rfr = (1.0 + RISK_FREE_RATE) ** (1.0 / tdpy) - 1.0
     w10 = max(1, int(round(10.0 * tdpy)))  # 10-year window in trading days
 
-    def _rolling_cagrs(pr: np.ndarray) -> np.ndarray | None:
-        """All rolling 10y CAGR values over every possible start date.
-        Returns None when history is shorter than the 10y window."""
+    def _rolling_cagrs_td(pr: np.ndarray) -> np.ndarray | None:
+        """All rolling 10y CAGR values over every possible start date, indexed by
+        trading days (distinct from module-level _rolling_cagrs which uses calendar
+        days on a price series). Returns None when history is shorter than 10y."""
         cum_ext = np.concatenate([[1.0], np.cumprod(1.0 + pr)])
         if len(cum_ext) <= w10:
             return None
@@ -1046,7 +885,7 @@ def compute_optimal_portfolio(
 
     def _mean_rolling_cagr(pr: np.ndarray) -> float:
         """Mean of all rolling 10y CAGRs; falls back to endpoint CAGR if history < 10y."""
-        cagrs = _rolling_cagrs(pr)
+        cagrs = _rolling_cagrs_td(pr)
         if cagrs is None:
             return float((1.0 + pr).prod()) ** (tdpy / len(pr)) - 1.0
         return float(np.mean(cagrs))
@@ -1073,7 +912,7 @@ def compute_optimal_portfolio(
     def _rolling_pct(w: np.ndarray, pct: float) -> float:
         """Rolling 10y CAGR percentile — used for max_p50_cagr / max_p1_cagr."""
         pr = ret_array @ w
-        cagrs = _rolling_cagrs(pr)
+        cagrs = _rolling_cagrs_td(pr)
         if cagrs is None:
             return float((1.0 + pr).prod()) ** (tdpy / len(pr)) - 1.0
         return float(np.percentile(cagrs, pct))
@@ -1106,9 +945,17 @@ def compute_optimal_portfolio(
             excess = (w[over] - caps[over]).sum()
             w[over] = caps[over]
             free = ~over & (w > 1e-9)
-            if free.sum() == 0:
-                break
-            w[free] += excess * w[free] / w[free].sum()
+            if free.sum() > 0:
+                w[free] += excess * w[free] / w[free].sum()
+                continue
+            # No allocated free positions left — threshold-zeroing wiped them.
+            # Fall back to capacity-weighted fill across non-over slots so the
+            # portfolio stays fully invested (caps win over min-weight threshold).
+            capacity = np.maximum(caps - w, 0.0) * (~over)
+            if capacity.sum() > 1e-9:
+                w += excess * capacity / capacity.sum()
+            else:
+                break  # caps genuinely sum to < 1 — cannot stay fully invested
         return w
 
     # ── Correlation matrix (computed once, reused per strategy) ──────────────
@@ -1147,6 +994,10 @@ def compute_optimal_portfolio(
         # Redefine affected objectives to use shrunken parameters.
         # P50/P1 objectives intentionally left unchanged (rolling pct already conservative).
         def _neg_sortino(w: np.ndarray) -> float:
+            # Asymmetric on purpose: numerator uses the shrunken annual mean
+            # (James-Stein), denominator uses raw daily downside deviation.
+            # Downside vol isn't a covariance estimate, so OAS shrinkage doesn't
+            # apply to it; shrinking only the mean is the standard treatment.
             pr = ret_array @ w
             port_ret = float(w @ mu_shrunk_ann)
             dv = float(np.sqrt(np.mean(np.minimum(pr - daily_rfr, 0.0) ** 2) * tdpy))
@@ -1183,12 +1034,12 @@ def compute_optimal_portfolio(
             portfolio_avg_corr=_weighted_avg_corr(w),
         )
 
-    w_sortino = _run_optimization(ret_array, n, _neg_sortino, bounds_box, constraints)
-    w_sharpe  = _run_optimization(ret_array, n, _neg_sharpe,  bounds_box, constraints)
-    w_minvar  = _run_optimization(ret_array, n, _variance,    bounds_box, constraints)
-    w_cagr    = _run_optimization(ret_array, n, _neg_cagr,    bounds_box, constraints)
-    w_p50     = _run_optimization(ret_array, n, _neg_p50_cagr, bounds_box, constraints)
-    w_p1      = _run_optimization(ret_array, n, _neg_p1_cagr,  bounds_box, constraints)
+    w_sortino = _run_optimization(ret_array, n, _neg_sortino, bounds_box, constraints, seed=seed)
+    w_sharpe  = _run_optimization(ret_array, n, _neg_sharpe,  bounds_box, constraints, seed=seed)
+    w_minvar  = _run_optimization(ret_array, n, _variance,    bounds_box, constraints, seed=seed)
+    w_cagr    = _run_optimization(ret_array, n, _neg_cagr,    bounds_box, constraints, seed=seed)
+    w_p50     = _run_optimization(ret_array, n, _neg_p50_cagr, bounds_box, constraints, seed=seed)
+    w_p1      = _run_optimization(ret_array, n, _neg_p1_cagr,  bounds_box, constraints, seed=seed)
     # Fix 4: equal weight also goes through _clean_weights so QQQ cap is enforced
     w_equal   = np.ones(n) / n
 
@@ -1202,16 +1053,21 @@ def compute_optimal_portfolio(
         "equal_weight": _make_strategy("Equal Weight", w_equal),
     }
 
-    # Recommended = use selected_strategy if valid; else highest P50-10y CAGR
+    # Recommended = selected_strategy if valid, else best by (P5 available, P5/P50/CAGR).
+    # Strategies whose common history is too short to compute rolling 10y P5 get
+    # deprioritised — a 40yr decumulation plan must be optimised on P5 survival,
+    # not P50 alone (P5=n/a means we can't size the worst-case downside).
+    def _rec_score(s: "PortfolioStrategy") -> tuple[int, float]:
+        if s.portfolio_cagr_p5 is not None:
+            return (1, s.portfolio_cagr_p5)
+        if s.portfolio_cagr_p50 is not None:
+            return (0, s.portfolio_cagr_p50)
+        return (0, s.portfolio_cagr)
+
     if selected_strategy and selected_strategy in strategies:
         recommended = selected_strategy
     else:
-        recommended = max(
-            strategies,
-            key=lambda k: strategies[k].portfolio_cagr_p50
-                          if strategies[k].portfolio_cagr_p50 is not None
-                          else strategies[k].portfolio_cagr,
-        )
+        recommended = max(strategies, key=lambda k: _rec_score(strategies[k]))
 
     ticker_names = {t: result_map[t].name for t in eligible if t in result_map}
 
@@ -1375,6 +1231,7 @@ def compute_cardinality_sweep(
     """For each k from 2 to min(len(eligible), max_k), enumerate all C(n,k) subsets,
     run the optimizer, and return the best portfolio per k for the given strategy."""
     import contextlib
+    import hashlib
     import io
     from itertools import combinations
 
@@ -1382,10 +1239,15 @@ def compute_cardinality_sweep(
     sweep: list[tuple[int, OptimalPortfolioResult]] = []
 
     for k in range(2, k_max + 1):
-        best_score = -np.inf
+        best_score: tuple[int, float] = (-1, -float("inf"))
         best_result: OptimalPortfolioResult | None = None
 
         for subset in combinations(eligible, k):
+            # Deterministic per-subset seed so each subset explores its own
+            # restart starts but the full sweep is still reproducible.
+            subset_seed = int(
+                hashlib.md5(",".join(subset).encode()).hexdigest()[:8], 16
+            )
             with contextlib.redirect_stdout(io.StringIO()):
                 opt = compute_optimal_portfolio(
                     results=results,
@@ -1398,13 +1260,20 @@ def compute_cardinality_sweep(
                     min_history_years=min_history_years,
                     use_bayesian_shrinkage=use_bayesian_shrinkage,
                     shrink_mean_intensity=shrink_mean_intensity,
+                    seed=subset_seed,
                 )
             if opt is None or strategy_key not in opt.strategies:
                 continue
             strat = opt.strategies[strategy_key]
-            score = (strat.portfolio_cagr_p50 if strat.portfolio_cagr_p50 is not None
-                     else strat.portfolio_cagr)
-            if score > best_score:
+            # Tuple score: P5-available subsets always rank above P5=None ones, so
+            # the sweep never recommends a combo whose worst-case can't be measured.
+            if strat.portfolio_cagr_p5 is not None:
+                score = (1, strat.portfolio_cagr_p5)
+            elif strat.portfolio_cagr_p50 is not None:
+                score = (0, strat.portfolio_cagr_p50)
+            else:
+                score = (0, strat.portfolio_cagr)
+            if best_result is None or score > best_score:
                 best_score = score
                 best_result = opt
 
@@ -1420,7 +1289,9 @@ def print_portfolio_final_summary(
     sweep: "list[tuple[int, OptimalPortfolioResult]] | None" = None,
     sp500_prices: "pd.Series | None" = None,
 ) -> None:
-    """Aligned table: full-set + each cardinality sweep result + S&P 500 reference row."""
+    """Compact table — k | Allocation | P50 | P5 | Sharpe | Sortino | MDD | Avg corr.
+    σ is dropped vs the verbose optimiser table; everything else relevant to a
+    40yr decumulation decision is kept."""
     strat_label = {
         "max_sortino": "Max Sortino", "max_sharpe": "Max Sharpe",
         "min_variance": "Min Variance", "max_cagr": "Max CAGR",
@@ -1428,17 +1299,15 @@ def print_portfolio_final_summary(
         "equal_weight": "Equal Weight",
     }.get(strategy_key, strategy_key)
 
-    # Column widths
-    k_w      = 3
-    p50_w    = 6
-    p5_w     = 6
-    s_w      = 6
-    sort_w   = 7
-    mdd_w    = 7
-    corr_w   = 8
-    # fixed chars per row: 2(indent)+k_w+2 + alloc_w+2 + p50_w+2 + p5_w+2 + s_w+2 + sort_w+2 + mdd_w+2 + corr_w
-    fixed    = 2 + k_w + 2 + 2 + p50_w + 2 + p5_w + 2 + s_w + 2 + sort_w + 2 + mdd_w + 2 + corr_w
-    alloc_w  = max(40, shutil.get_terminal_size((120, 50)).columns - fixed)
+    k_w     = 4   # widened from 3 to fit "★all" / "★2" / "☆3" prefixes
+    p50_w   = 6
+    p5_w    = 6
+    ratio_w = 6   # Sharpe / Sortino
+    mdd_w   = 7
+    corr_w  = 6
+    fixed = (2 + k_w + 2 + 2 + p50_w + 2 + p5_w + 2 + ratio_w + 2
+             + ratio_w + 2 + mdd_w + 2 + corr_w)
+    alloc_w = max(40, shutil.get_terminal_size((120, 50)).columns - fixed)
 
     def _alloc(result: "OptimalPortfolioResult", key: str) -> str:
         strat = result.strategies[key]
@@ -1449,50 +1318,74 @@ def print_portfolio_final_summary(
         ]
         return " + ".join(parts)
 
-    def _row(k_label: str, alloc: str, p50: str, p5: str, sig: str,
-             sortino: str, mdd: str, corr: str = "—") -> None:
+    def _row(k_label: str, alloc: str, p50: str, p5: str,
+             sharpe: str, sortino: str, mdd: str, corr: str) -> None:
         print(f"  {k_label:>{k_w}}  {alloc:<{alloc_w}}"
-              f"  {p50:>{p50_w}}  {p5:>{p5_w}}  {sig:>{s_w}}"
-              f"  {sortino:>{sort_w}}  {mdd:>{mdd_w}}  {corr:>{corr_w}}")
+              f"  {p50:>{p50_w}}  {p5:>{p5_w}}"
+              f"  {sharpe:>{ratio_w}}  {sortino:>{ratio_w}}"
+              f"  {mdd:>{mdd_w}}  {corr:>{corr_w}}")
 
     def _fmt_strat(strat: "PortfolioStrategy", n_years: float) -> tuple[str, str, str, str, str, str]:
         use_p50 = n_years >= 10
-        cagr = strat.portfolio_cagr_p50 if use_p50 else strat.portfolio_cagr
-        p50  = f"{cagr * 100:.1f}%"      if cagr is not None                    else "n/a"
-        p5   = f"{strat.portfolio_cagr_p5 * 100:.1f}%" if strat.portfolio_cagr_p5 is not None else "n/a"
-        sig  = f"{strat.portfolio_annual_ret_std * 100:.1f}%" if strat.portfolio_annual_ret_std is not None else "n/a"
-        srt  = f"{strat.portfolio_sortino:.2f}"  if strat.portfolio_sortino is not None else "n/a"
-        mdd  = f"{strat.portfolio_mdd * 100:.1f}%" if strat.portfolio_mdd is not None else "n/a"
-        corr = f"{strat.portfolio_avg_corr:.2f}"  if strat.portfolio_avg_corr is not None else "n/a"
-        return p50, p5, sig, srt, mdd, corr
+        cagr   = strat.portfolio_cagr_p50 if use_p50 else strat.portfolio_cagr
+        p50    = f"{cagr * 100:.1f}%" if cagr is not None else "n/a"
+        p5     = f"{strat.portfolio_cagr_p5 * 100:.1f}%" if strat.portfolio_cagr_p5 is not None else "n/a"
+        sharpe = f"{strat.portfolio_sharpe:.2f}" if strat.portfolio_sharpe is not None else "n/a"
+        srt    = f"{strat.portfolio_sortino:.2f}" if strat.portfolio_sortino is not None else "n/a"
+        mdd    = f"{strat.portfolio_mdd * 100:.1f}%" if strat.portfolio_mdd is not None else "n/a"
+        corr   = f"{strat.portfolio_avg_corr:.2f}" if strat.portfolio_avg_corr is not None else "n/a"
+        return p50, p5, sharpe, srt, mdd, corr
 
-    W = 2 + k_w + 2 + alloc_w + 2 + p50_w + 2 + p5_w + 2 + s_w + 2 + sort_w + 2 + mdd_w
-    print(f"{'OPTIMAL PORTFOLIO — FINAL SUMMARY':^{W}}")
-    print(f"  Strategy : {strat_label}")
-    print()
+    def _flag_alloc(result: "OptimalPortfolioResult", key: str) -> str:
+        strat = result.strategies.get(key)
+        prefix = "⚠ " if (strat is not None and strat.portfolio_cagr_p5 is None) else ""
+        return prefix + _alloc(result, key)
 
-    # Header
-    _row("k", "Allocation", "P50", "P5", "σ", "Sortino", "MDD", "Avg corr")
-    print("  " + "─" * (W - 2))
+    # Tuple score per row: (P5-available flag, P5/P50/CAGR). Same ranking
+    # used by the recommender — a row with measurable P5 always beats a row
+    # with P5=n/a (history < 10y), since a 40yr decum needs a real worst-case.
+    def _row_score(strat: "PortfolioStrategy") -> tuple[int, float]:
+        if strat.portfolio_cagr_p5 is not None:
+            return (1, strat.portfolio_cagr_p5)
+        if strat.portfolio_cagr_p50 is not None:
+            return (0, strat.portfolio_cagr_p50)
+        return (0, strat.portfolio_cagr)
 
-    # Full-set row
+    # Collect candidates in display order, then rank to find top-1 / top-2.
+    candidates: list[tuple[str, "OptimalPortfolioResult", "PortfolioStrategy"]] = []
     if strategy_key in opt_result.strategies:
-        strat = opt_result.strategies[strategy_key]
-        p50, p5, sig, srt, mdd, corr = _fmt_strat(strat, opt_result.n_years)
-        alloc = _alloc(opt_result, strategy_key)
-        _row("all", alloc, p50, p5, sig, srt, mdd, corr)
-
-    # Cardinality sweep rows
+        candidates.append(("all", opt_result, opt_result.strategies[strategy_key]))
     if sweep:
         for k, result in sweep:
-            if strategy_key not in result.strategies:
-                continue
-            strat = result.strategies[strategy_key]
-            p50, p5, sig, srt, mdd, corr = _fmt_strat(strat, result.n_years)
-            alloc = _alloc(result, strategy_key)
-            _row(str(k), alloc, p50, p5, sig, srt, mdd, corr)
+            if strategy_key in result.strategies:
+                candidates.append((str(k), result, result.strategies[strategy_key]))
 
-    # S&P 500 reference row
+    ranked_labels = [c[0] for c in sorted(candidates,
+                                          key=lambda c: _row_score(c[2]),
+                                          reverse=True)]
+    top1 = ranked_labels[0] if len(ranked_labels) >= 1 else None
+    top2 = ranked_labels[1] if len(ranked_labels) >= 2 else None
+
+    def _mark(label: str) -> str:
+        if label == top1:
+            return f"★{label}"
+        if label == top2:
+            return f"☆{label}"
+        return label
+
+    W = fixed + alloc_w
+    print(f"{'OPTIMAL PORTFOLIO — FINAL SUMMARY':^{W}}")
+    print(f"  Strategy : {strat_label}   ·   ★ recommended   ☆ runner-up   ·   ⚠ = P5 n/a (history < 10y)")
+    print()
+
+    _row("k", "Allocation", "P50", "P5", "Sharpe", "Sortino", "MDD", "Avg corr")
+    print("  " + "─" * (W - 2))
+
+    for label, result, strat in candidates:
+        p50, p5, sharpe, srt, mdd, corr = _fmt_strat(strat, result.n_years)
+        _row(_mark(label), _flag_alloc(result, strategy_key),
+             p50, p5, sharpe, srt, mdd, corr)
+
     if sp500_prices is not None:
         ref = _era_stats(sp500_prices, "2000-01-01", None)
         if ref["cagr"] is not None:
@@ -1501,8 +1394,8 @@ def print_portfolio_final_summary(
                 "ref",
                 f"S&P 500  2000–today  [{ref['yr_from']}–{ref['yr_to']}]",
                 f"{ref['cagr'] * 100:.1f}%", "—",
-                f"{ref['vol']  * 100:.1f}%", "—",
-                f"{ref['mdd']  * 100:.1f}%",
+                "—", "—",
+                f"{ref['mdd']  * 100:.1f}%", "—",
             )
 
     print()
@@ -1660,9 +1553,9 @@ def _era_stats(prices: pd.Series, start: str | None, end: str | None) -> dict:
 
 
 def _era_rolling_stats(prices: pd.Series, start: str | None, end: str | None) -> dict:
-    """p10/p50/p90 of CAGR, MDD, and vol across all entry days in the first year of the era."""
+    """p5/p10/p50/p90 of CAGR, MDD, and vol across all entry days in the first year of the era."""
     _null = {k: None for k in (
-        "cagr_p10", "cagr_p50", "cagr_p90",
+        "cagr_p5",  "cagr_p10", "cagr_p50", "cagr_p90",
         "mdd_p10",  "mdd_p50",  "mdd_p90",
         "vol_p10",  "vol_p50",  "vol_p90",
         "yr_from",  "yr_to",
@@ -1696,6 +1589,7 @@ def _era_rolling_stats(prices: pd.Series, start: str | None, end: str | None) ->
     md = np.array(mdds)
     vo = np.array(vols)
     return {
+        "cagr_p5":  float(np.percentile(ca, 5)),
         "cagr_p10": float(np.percentile(ca, 10)), "cagr_p50": float(np.percentile(ca, 50)), "cagr_p90": float(np.percentile(ca, 90)),
         "mdd_p10":  float(np.percentile(md, 10)), "mdd_p50":  float(np.percentile(md, 50)), "mdd_p90":  float(np.percentile(md, 90)),
         "vol_p10":  float(np.percentile(vo, 10)), "vol_p50":  float(np.percentile(vo, 50)), "vol_p90":  float(np.percentile(vo, 90)),
@@ -1728,7 +1622,7 @@ def print_benchmark_era_table(
     NC, EC, CC, VC = 20, 14, 12, 22   # name, era, coverage, triple-value col widths
     W = NC + EC + CC + VC * 3 + 14
 
-    print(f"{'BENCHMARK INDICES — ERA ANALYSIS':^{W}}")
+    print("BENCHMARK INDICES — ERA ANALYSIS")
     print("  p10 / p50 / p90 across all entry days in the first calendar year of each era.")
     print("  p10 = bad-luck entry, p50 = typical, p90 = good-luck entry.")
     if era_horizon_year is not None:
@@ -1766,11 +1660,17 @@ def print_forward_cagr_estimates(
     n_simulations: int = 50_000,
     initial_stock: float = 0.0,
     monthly_contribution: float = 0.0,
-) -> None:
-    """CAPE-implied forward CAGR + two-phase lost-decade Monte Carlo stress test."""
+    verbose: bool = True,
+) -> dict:
+    """CAPE-implied forward CAGR + two-phase lost-decade Monte Carlo stress test.
+    Always computes; printing is gated by `verbose`. Returns a dict of key metrics
+    for downstream consumers (e.g. the take-away recap)."""
+    summary: dict = {}
     W = 70
-    print(f"{'FORWARD CAGR ESTIMATES — HORIZON ' + str(horizon_years) + 'yr':^{W}}")
-    print()
+    if verbose:
+        title = f"FORWARD CAGR ESTIMATES — HORIZON {horizon_years}yr"
+        print(f"{title:^{W}}")
+        print()
 
     # ── CAPE-implied forward CAGR ─────────────────────────────────────────────
     if cape_ratio is not None and cape_ratio > 0:
@@ -1780,18 +1680,23 @@ def print_forward_cagr_estimates(
         reversion = (cape_long_run_mean / cape_ratio) ** (1.0 / horizon_years) - 1.0
         real_cagr    = earnings_yield + cape_eps_growth + reversion
         nominal_cagr = (1.0 + real_cagr) * (1.0 + inflation) - 1.0
+        summary["cape_ratio"]         = cape_ratio
+        summary["cape_long_run_mean"] = cape_long_run_mean
+        summary["cape_real_cagr"]     = real_cagr
+        summary["cape_nominal_cagr"]  = nominal_cagr
 
-        print("  CAPE-implied forward CAGR:")
-        print(f"    Current CAPE          : {cape_ratio:.1f}")
-        print(f"    Earnings yield (1/CAPE): {earnings_yield * 100:+.2f}%")
-        print(f"    Real EPS growth       : {cape_eps_growth * 100:+.2f}%")
-        print(f"    CAPE reversion drag   : {reversion * 100:+.2f}%"
-              f"  ({cape_ratio:.0f} → {cape_long_run_mean:.0f} over {horizon_years}yr)")
-        print(f"    {'─' * 38}")
-        print(f"    Implied real CAGR     : {real_cagr * 100:.1f}%")
-        print(f"    Implied nominal CAGR  : {nominal_cagr * 100:.1f}%"
-              f"  (+ {inflation * 100:.1f}% inflation)")
-        print()
+        if verbose:
+            print("  CAPE-implied forward CAGR:")
+            print(f"    Current CAPE          : {cape_ratio:.1f}")
+            print(f"    Earnings yield (1/CAPE): {earnings_yield * 100:+.2f}%")
+            print(f"    Real EPS growth       : {cape_eps_growth * 100:+.2f}%")
+            print(f"    CAPE reversion drag   : {reversion * 100:+.2f}%"
+                  f"  ({cape_ratio:.0f} → {cape_long_run_mean:.0f} over {horizon_years}yr)")
+            print(f"    {'─' * 38}")
+            print(f"    Implied real CAGR     : {real_cagr * 100:.1f}%")
+            print(f"    Implied nominal CAGR  : {nominal_cagr * 100:.1f}%"
+                  f"  (+ {inflation * 100:.1f}% inflation)")
+            print()
 
     # ── Two-phase stress test ─────────────────────────────────────────────────
     # Use S&P 500 era stats (2000-2009 = lost decade, 2009-today = recovery)
@@ -1799,12 +1704,18 @@ def print_forward_cagr_estimates(
         (prices for ticker, prices, _, _ in benchmark_data if ticker == "^GSPC"), None
     )
     if sp500_prices is None:
-        return
+        return summary
 
+    # Phase 1 = lost decade (2000-2009, fixed 10y). Phase 2 = early recovery
+    # within the user's scenario horizon: end at year (2000 + horizon_years) so
+    # a 15yr horizon samples the 2009-2015 sub-window rather than 2009-today.
+    # This makes the MC's "2000-2015 redux" actually match the historical
+    # 2000-2015 row in the take-away table.
+    rec_end = f"{2000 + horizon_years + 1}-01-01"
     lost = _era_stats(sp500_prices, "2000-01-01", "2010-01-01")
-    rec  = _era_stats(sp500_prices, "2009-01-01", None)
+    rec  = _era_stats(sp500_prices, "2009-01-01", rec_end)
     if lost["cagr"] is None or rec["cagr"] is None:
-        return
+        return summary
 
     # Geometric → arithmetic mean:  arithmetic ≈ geometric + σ²/2
     phase1_mean = lost["cagr"] + 0.5 * lost["vol"] ** 2
@@ -1825,28 +1736,37 @@ def print_forward_cagr_estimates(
     p5, p25, p50, p75, p95 = (float(np.percentile(cagrs, p)) for p in (5, 25, 50, 75, 95))
     prob_positive = float(np.mean(cagrs > 0)) * 100
     prob_above5   = float(np.mean(cagrs > 0.05)) * 100
+    summary["lump_p5"]        = p5
+    summary["lump_p25"]       = p25
+    summary["lump_p50"]       = p50
+    summary["lump_p75"]       = p75
+    summary["lump_p95"]       = p95
+    summary["lump_prob_pos"]  = prob_positive
+    summary["lump_prob_5pct"] = prob_above5
 
-    print("  Two-phase stress test  (S&P 500 as equity proxy, native USD):")
-    print(f"    Phase 1 — {phase1_yrs:2d}yr lost decade : "
-          f"mean={phase1_mean * 100:+.1f}%  σ={phase1_std * 100:.1f}%"
-          f"  ({lost['yr_from']}–{lost['yr_to']})")
-    if phase2_yrs > 0:
-        print(f"    Phase 2 — {phase2_yrs:2d}yr recovery    : "
-              f"mean={phase2_mean * 100:+.1f}%  σ={phase2_std * 100:.1f}%"
-              f"  ({rec['yr_from']}–{rec['yr_to']})")
-    print(f"    {n_simulations:,} simulations  |  total horizon {horizon_years}yr")
-    print(f"    {'─' * 38}")
-    print(f"    P5  CAGR : {p5  * 100:.1f}%   (worst 5% of outcomes)")
-    print(f"    P25 CAGR : {p25 * 100:.1f}%")
-    print(f"    P50 CAGR : {p50 * 100:.1f}%   (median outcome)")
-    print(f"    P75 CAGR : {p75 * 100:.1f}%")
-    print(f"    P95 CAGR : {p95 * 100:.1f}%   (best 5% of outcomes)")
-    print(f"    P(CAGR>0) : {prob_positive:.0f}%   P(CAGR>5%) : {prob_above5:.0f}%")
-    print()
+    if verbose:
+        print("  Two-phase stress test  (S&P 500 as equity proxy, native USD):")
+        print(f"    Phase 1 — {phase1_yrs:2d}yr lost decade : "
+              f"mean={phase1_mean * 100:+.1f}%  σ={phase1_std * 100:.1f}%"
+              f"  ({lost['yr_from']}–{lost['yr_to']})")
+        if phase2_yrs > 0:
+            print(f"    Phase 2 — {phase2_yrs:2d}yr recovery    : "
+                  f"mean={phase2_mean * 100:+.1f}%  σ={phase2_std * 100:.1f}%"
+                  f"  ({rec['yr_from']}–{rec['yr_to']})")
+        print(f"    {n_simulations:,} simulations  |  total horizon {horizon_years}yr")
+        print(f"    {'─' * 38}")
+        print(f"    P5  CAGR : {p5  * 100:.1f}%   (worst 5% of outcomes)")
+        print(f"    P25 CAGR : {p25 * 100:.1f}%")
+        print(f"    P50 CAGR : {p50 * 100:.1f}%   (median outcome)")
+        print(f"    P75 CAGR : {p75 * 100:.1f}%")
+        print(f"    P95 CAGR : {p95 * 100:.1f}%   (best 5% of outcomes)")
+        print(f"    P(CAGR>0) : {prob_positive:.0f}%   P(CAGR>5%) : {prob_above5:.0f}%")
+        print()
 
     # ── DCA stress test ───────────────────────────────────────────────────────
-    # Same two-phase scenario but with ongoing monthly contributions: lower average
-    # cost basis during a lost decade improves ROIC relative to lump-sum.
+    # Same two-phase scenario but with ongoing monthly contributions. Money-weighted
+    # IRR is the apples-to-apples comparison vs lump-sum CAGR (gives each contribution
+    # credit for the time it was actually invested).
     if monthly_contribution > 0:
         annual_C = monthly_contribution * 12.0
         total_invested = initial_stock + annual_C * horizon_years
@@ -1879,366 +1799,265 @@ def print_forward_cagr_estimates(
             )
             portfolio = portfolio * (1.0 + annual_r) + annuity_fv
 
-        # ROIC: annualised return on all capital deployed (initial + contributions)
-        roic = (portfolio / total_invested) ** (1.0 / horizon_years) - 1.0
+        # Money-weighted IRR per simulation: annual r solving
+        #   p0*(1+r)^N + monthly_c*((1+r_m)^(12N)-1)/r_m == final_portfolio
+        # Vectorised bisection (monotonic in r; ~50 iters is overkill for 1e-7 precision).
+        months = 12 * horizon_years
+        lo = np.full(n_simulations, -0.99)
+        hi = np.full(n_simulations,  5.00)
+        for _ in range(50):
+            mid = 0.5 * (lo + hi)
+            r_m = (1.0 + mid) ** (1.0 / 12) - 1.0
+            ok  = np.abs(r_m) > 1e-12
+            annuity_proj = np.where(
+                ok,
+                monthly_contribution * ((1.0 + r_m) ** months - 1.0) / r_m,
+                monthly_contribution * months,
+            )
+            proj = initial_stock * (1.0 + mid) ** horizon_years + annuity_proj
+            too_low = proj < portfolio
+            lo = np.where(too_low, mid, lo)
+            hi = np.where(too_low, hi, mid)
+        irr = 0.5 * (lo + hi)
 
         rp5, rp25, rp50, rp75, rp95 = (
-            float(np.percentile(roic, p)) for p in (5, 25, 50, 75, 95)
+            float(np.percentile(irr, p)) for p in (5, 25, 50, 75, 95)
         )
         fp5, fp25, fp50, fp75, fp95 = (
             float(np.percentile(portfolio / 1e3, p)) for p in (5, 25, 50, 75, 95)
         )
-        prob_roic_pos  = float(np.mean(roic > 0))   * 100
-        prob_roic_5pct = float(np.mean(roic > 0.05)) * 100
+        invested_k = total_invested / 1e3
+        pl5, pl25, pl50, pl75, pl95 = (
+            fp - invested_k for fp in (fp5, fp25, fp50, fp75, fp95)
+        )
+        prob_irr_pos  = float(np.mean(irr > 0))   * 100
+        prob_irr_5pct = float(np.mean(irr > 0.05)) * 100
+        summary["dca_p5_irr"]         = rp5
+        summary["dca_p25_irr"]        = rp25
+        summary["dca_p50_irr"]        = rp50
+        summary["dca_p75_irr"]        = rp75
+        summary["dca_p95_irr"]        = rp95
+        summary["dca_p5_final_k"]     = fp5
+        summary["dca_p50_final_k"]    = fp50
+        summary["dca_p95_final_k"]    = fp95
+        summary["dca_p5_pl_k"]        = pl5
+        summary["dca_p50_pl_k"]       = pl50
+        summary["dca_p95_pl_k"]       = pl95
+        summary["dca_total_invested"] = total_invested
 
-        print("  DCA stress test  (same two-phase scenario + monthly contributions):")
-        print(f"    Initial stock portfolio : €{initial_stock:>10,.0f}")
-        print(f"    Monthly contribution    : €{monthly_contribution:>10,.0f}")
-        print(f"    Total invested (horizon): €{total_invested:>10,.0f}")
-        print(f"    {'─' * 50}")
-        print(f"    {'':20}  {'ROIC (ann.)':>11}   {'Final portfolio (k€)':>20}")
-        print(f"    {'P5  (worst 5%)':20}  {rp5*100:>10.1f}%   {fp5:>20.0f}")
-        print(f"    {'P25':20}  {rp25*100:>10.1f}%   {fp25:>20.0f}")
-        print(f"    {'P50  (median)':20}  {rp50*100:>10.1f}%   {fp50:>20.0f}")
-        print(f"    {'P75':20}  {rp75*100:>10.1f}%   {fp75:>20.0f}")
-        print(f"    {'P95  (best 5%)':20}  {rp95*100:>10.1f}%   {fp95:>20.0f}")
-        print(f"    {'─' * 50}")
-        print(f"    P(ROIC>0) : {prob_roic_pos:.0f}%   P(ROIC>5%) : {prob_roic_5pct:.0f}%")
-        print(f"    vs lump-sum P50 CAGR: {p50*100:.1f}%  →  DCA P50 ROIC: {rp50*100:.1f}%"
-              f"  (Δ={( rp50-p50)*100:+.1f}pp)")
+        if verbose:
+            print("  DCA stress test  (same two-phase scenario + monthly contributions):")
+            print(f"    Initial stock portfolio : €{initial_stock:>10,.0f}")
+            print(f"    Monthly contribution    : €{monthly_contribution:>10,.0f}")
+            print(f"    Total invested (horizon): €{total_invested:>10,.0f}")
+            print(f"    {'─' * 70}")
+            print(f"    {'':20}  {'IRR (ann.)':>11}   {'Final portfolio (k€)':>20}   {'P&L (k€)':>12}")
+            print(f"    {'P5  (worst 5%)':20}  {rp5*100:>10.1f}%   {fp5:>20.0f}   {pl5:>+12,.0f}")
+            print(f"    {'P25':20}  {rp25*100:>10.1f}%   {fp25:>20.0f}   {pl25:>+12,.0f}")
+            print(f"    {'P50  (median)':20}  {rp50*100:>10.1f}%   {fp50:>20.0f}   {pl50:>+12,.0f}")
+            print(f"    {'P75':20}  {rp75*100:>10.1f}%   {fp75:>20.0f}   {pl75:>+12,.0f}")
+            print(f"    {'P95  (best 5%)':20}  {rp95*100:>10.1f}%   {fp95:>20.0f}   {pl95:>+12,.0f}")
+            print(f"    {'─' * 70}")
+            print(f"    P(IRR>0) : {prob_irr_pos:.0f}%   P(IRR>5%) : {prob_irr_5pct:.0f}%")
+            print(f"    vs lump-sum P50 CAGR: {p50*100:.1f}%  →  DCA P50 IRR: {rp50*100:.1f}%"
+                  f"  (Δ={(rp50 - p50) * 100:+.1f}pp,  money-weighted)")
+            print()
+
+    return summary
+
+
+# ── Take-away recap ───────────────────────────────────────────────────────────
+
+def print_take_away(
+    forward_summary: dict,
+    native_data: list,
+    opt_result: "OptimalPortfolioResult | None",
+    sweep: "list[tuple[int, OptimalPortfolioResult]] | None",
+    sweep_strategy: str,
+    horizon_years: int,
+    config_stock_cagr: float,
+    fx_cache: dict | None = None,
+    planning_cagr_override: float | None = None,
+) -> None:
+    """Compact recap — instrument selection + CAGR realism check.
+    Decumulation survival lives in main_decumulation.py (run that for SORR analysis)."""
+    W = 70
+    print(f"{'TAKE AWAY — CAGR ANALYSIS':^{W}}")
+    print()
+
+    # ── 1. Assumed CAGR vs the real world ────────────────────────────────────
+    # Verdict applies to the ACTIVE planning value (override if set, else config).
+    # When --cagr overrides the baseline, the verdict moves to the Planning line
+    # — otherwise the user sees "config 6% → optimistic" while planning at 4%.
+    nom_cagr   = forward_summary.get("cape_nominal_cagr") if forward_summary else None
+    active     = planning_cagr_override if planning_cagr_override is not None else config_stock_cagr
+    delta      = active - nom_cagr if nom_cagr is not None else None
+    if delta is None:
+        verdict = ""
+    elif delta > 0.02:
+        verdict = "   → optimistic"
+    elif delta < -0.02:
+        verdict = "   → conservative"
+    else:
+        verdict = "   → in range"
+
+    print("  1. Expected CAGR — does the assumed return exist in the real world?")
+    # Baseline line gets the verdict only when there's no override.
+    baseline_suffix = "" if planning_cagr_override is not None else verdict
+    print(f"     Assumed CAGR (config) : {config_stock_cagr*100:+.1f}% / yr{baseline_suffix}")
+    if nom_cagr is not None:
+        print(f"     CAPE-implied nominal  : {nom_cagr*100:+.1f}% / yr")
+    if planning_cagr_override is not None:
+        print(f"     Planning CAGR (CLI)   : {planning_cagr_override*100:+.1f}% / yr{verdict}"
+              f"   (--cagr override active)")
+    elif nom_cagr is not None and delta is not None and delta > 0.02:
+        # No override set, baseline reads optimistic — suggest a value just
+        # above CAPE (CAPE + 2pp, the tolerance-band edge between "optimistic"
+        # and "in range"). Capped at config so we never suggest going higher.
+        suggested = min(config_stock_cagr, nom_cagr + 0.02)
+        print(f"     → To plan with CAPE-aligned returns, re-run with "
+              f"--cagr {suggested*100:.1f}")
+    print()
+
+    # Rolling-CAGR table — historical S&P (USD + EUR) and forward MC scenarios
+    sp500_native = next((p for t, p, _, _ in native_data if t == "^GSPC"), None)
+    sp500_eur: pd.Series | None = None
+    if sp500_native is not None and fx_cache is not None:
+        try:
+            sp_eur = convert_to_eur(sp500_native, "USD", fx_cache.get("USD"))
+            if sp_eur is not None and len(sp_eur) > 0:
+                sp_eur = sp_eur.copy()
+                sp_eur.index = pd.to_datetime(sp_eur.index).normalize()
+                sp_eur = sp_eur[~sp_eur.index.duplicated(keep="last")]
+                sp500_eur = sp_eur
+        except Exception:
+            sp500_eur = None
+
+    rows: list[tuple[str, str, float | None, float | None]] = []
+    if sp500_native is not None:
+        era = _era_rolling_stats(sp500_native, "2000-01-01", None)
+        if era["cagr_p5"] is not None:
+            rows.append(("S&P 500  USD", f"{era['yr_from']}–{era['yr_to']}",
+                         era["cagr_p5"], era["cagr_p50"]))
+        end_year = 2000 + horizon_years
+        era2 = _era_rolling_stats(sp500_native, "2000-01-01", f"{end_year + 1}-01-01")
+        if era2["cagr_p5"] is not None:
+            rows.append(("S&P 500  USD", f"{era2['yr_from']}–{era2['yr_to']}",
+                         era2["cagr_p5"], era2["cagr_p50"]))
+    if sp500_eur is not None:
+        era3 = _era_rolling_stats(sp500_eur, None, None)
+        if era3["cagr_p5"] is not None:
+            rows.append(("S&P 500  EUR", f"{era3['yr_from']}–{era3['yr_to']}",
+                         era3["cagr_p5"], era3["cagr_p50"]))
+
+    # Label the MC scenario by the historical era it samples from (2000-onwards),
+    # not by forward calendar years — makes the rows directly comparable to the
+    # historical S&P 500 2000-{2000+horizon} row above.
+    scenario_range = f"2000–{2000 + horizon_years}"
+    lp50 = forward_summary.get("lump_p50") if forward_summary else None
+    lp5  = forward_summary.get("lump_p5")  if forward_summary else None
+    if lp50 is not None and lp5 is not None:
+        rows.append(("Lump-sum 2-phase MC", scenario_range, lp5, lp50))
+    rp50 = forward_summary.get("dca_p50_irr") if forward_summary else None
+    rp5  = forward_summary.get("dca_p5_irr")  if forward_summary else None
+    if rp50 is not None and rp5 is not None:
+        rows.append(("DCA      2-phase MC", scenario_range, rp5, rp50))
+
+    if rows:
+        print("     Real-world CAGR distributions  (P5 = bad-luck entry, P50 = typical):")
+        print()
+        print(f"     {'Source':<22}  {'Period':<13}  {'P5':>6}  {'P50':>6}")
+        print(f"     {'─' * 22}  {'─' * 13}  {'─' * 6}  {'─' * 6}")
+        for src, period, p5v, p50v in rows:
+            print(f"     {src:<22}  {period:<13}"
+                  f"  {p5v*100:>+5.1f}%  {p50v*100:>+5.1f}%")
+        print()
+        print("     P50s matching across historical and MC rows validates the model:")
+        print("     the MC's median outcome reproduces the lost-decade-plus-recovery")
+        print("     historical CAGR. The MC's tail (P5) tells you what the distribution")
+        print("     of possible 2000-2015-like sequences looks like, not just the one")
+        print("     we actually got. Historical P5 is narrow because all 2000 entries")
+        print("     land near the same point by 2015; MC P5 is wide because Gaussian")
+        print("     resampling produces many alternative sequences with the same mean+σ.")
         print()
 
-
-def _decum_sim(
-    stock_r: np.ndarray,
-    bond_r: np.ndarray,
-    infl_r: np.ndarray,
-    initial_stock: float,
-    initial_bond: float,
-    initial_monthly_wd: float,
-    n_years: int,
-    bond_tax: float,
-    pension_monthly: float,
-    pension_start_yr: int,
-    pension_adj: float,
-    stock_pct_start: float,
-    glide_end_pct: float,
-    glide_yrs: int,
-) -> tuple[float, int | None, dict[int, np.ndarray]]:
-    """Vectorised decumulation loop. Returns (survival_rate, median_ruin_year, portfolio_at_key_years)."""
-    n_sims = stock_r.shape[0]
-    stock_v    = np.full(n_sims, initial_stock)
-    bond_v     = np.full(n_sims, initial_bond)
-    alive      = np.ones(n_sims, dtype=bool)
-    cum_inf    = np.ones(n_sims)
-    ruin_years = np.full(n_sims, -1, dtype=int)
-    target_annual_nom = initial_monthly_wd * 12.0
-    portfolio_at: dict[int, np.ndarray] = {}
-    _glide = glide_yrs > 0 and abs(glide_end_pct - stock_pct_start) > 1e-6
-
-    for year in range(n_years):
-        stock_v     = stock_v * (1.0 + stock_r[:, year])
-        bond_coupon = bond_v * bond_r[:, year] * (1.0 - bond_tax)
-        cum_inf     = cum_inf * (1.0 + infl_r[:, year])
-
-        if _glide:
-            progress = min(year + 1, glide_yrs) / glide_yrs
-            tgt_frac = stock_pct_start + (glide_end_pct - stock_pct_start) * progress
-            total_v  = stock_v + bond_v
-            mask     = alive & (total_v > 0.0)
-            stock_v  = np.where(mask, total_v * tgt_frac, stock_v)
-            bond_v   = np.where(mask, total_v * (1.0 - tgt_frac), bond_v)
-
-        pension_inc = (
-            pension_monthly * 12.0 * (1.0 + pension_adj) ** (year - pension_start_yr)
-            if year >= pension_start_yr else 0.0
+    # ── 2. Optimal portfolio summary table ───────────────────────────────────
+    if opt_result:
+        sp500_prices = next((p for t, p, _, _ in native_data if t == "^GSPC"), None)
+        print("  2. Optimal portfolio")
+        print_portfolio_final_summary(
+            opt_result,
+            strategy_key=sweep_strategy,
+            sweep=sweep,
+            sp500_prices=sp500_prices,
         )
-        target   = target_annual_nom * cum_inf
-        passive  = bond_coupon + pension_inc
-        residual = np.maximum(0.0, target - passive)
-        surplus  = np.maximum(0.0, passive - target)
-
-        stock_v   = stock_v - np.where(alive, residual, 0.0) + np.where(alive, surplus, 0.0)
-        shortfall = np.maximum(0.0, -stock_v)
-        stock_v   = np.maximum(stock_v, 0.0)
-        bond_v    = np.maximum(bond_v - np.where(alive, shortfall, 0.0), 0.0)
-
-        total_v    = stock_v + bond_v
-        newly_dead = alive & (total_v <= 0.0)
-        ruin_years = np.where(newly_dead, year + 1, ruin_years)
-        alive      = alive & (total_v > 0.0)
-
-        if (year + 1) in (10, 20, 30, 40):
-            portfolio_at[year + 1] = total_v.copy()
-
-    failed   = ruin_years > 0
-    ruin_med = int(np.median(ruin_years[failed])) if np.any(failed) else None
-    return float(np.mean(alive)), ruin_med, portfolio_at
 
 
-def print_sorr_stress_test(
-    benchmark_data: list,
-    cfg_raw: dict,
-    n_simulations: int = 20_000,
-) -> tuple[float | None, float | None]:
-    """SORR stress test: lost decade starts on retirement day.
-    Returns (stress_survival, baseline_survival) for use in plan verdict."""
-    sp500 = next((p for t, p, _, _ in benchmark_data if t == "^GSPC"), None)
-    if sp500 is None:
-        return None, None
-    lost = _era_stats(sp500, "2000-01-01", "2010-01-01")
-    rec  = _era_stats(sp500, "2009-01-01", None)
-    if lost["cagr"] is None or rec["cagr"] is None:
-        return None, None
+# ── Realism snapshot ──────────────────────────────────────────────────────────
 
-    horizon_yrs      = int(cfg_raw.get("years", 15))
-    inflation        = float(cfg_raw.get("expected_inflation_percent", 2.3)) / 100
-    target_monthly   = float(cfg_raw.get("target_monthly_retirement_income", 3300.0))
-    withdrawal_rate  = float(cfg_raw.get("withdrawal_percentage_stock", 2.8)) / 100
-    bonds_pct        = float(cfg_raw.get("bonds_percentage", 50.0)) / 100
-    stock_pct        = 1.0 - bonds_pct
-    yield_bonds      = float(cfg_raw.get("yield_bonds", 3.4)) / 100
-    bond_tax         = float(cfg_raw.get("tax_rate_bond_italy", 0.125))
-    pension_monthly  = float(cfg_raw.get("mc_decumulation_pension_monthly", 0.0))
-    pension_start_yr = int(cfg_raw.get("mc_decumulation_pension_start_year", 15))
-    pension_adj      = float(cfg_raw.get("mc_decumulation_pension_adjustment_rate", 0.0))
-    n_years          = int(cfg_raw.get("mc_decumulation_years", 40))
-    glide_end_pct    = float(cfg_raw.get("mc_decumulation_glide_end_pct", 0.30))
-    glide_yrs        = int(cfg_raw.get("mc_decumulation_glide_years", 20))
-    stock_cagr       = float(cfg_raw.get("expected_yearly_growth_stocks_percent", 6.0)) / 100
-    stock_std        = float(cfg_raw.get("mc_stock_return_std_percent", 15.0)) / 100
+def _build_realism_snapshot(
+    forward_summary: dict,
+    benchmark_prices: dict,
+    fx_cache: dict,
+    opt_result: "OptimalPortfolioResult | None",
+    sweep: "list[tuple[int, OptimalPortfolioResult]] | None",
+    sweep_strategy: str,
+) -> "CagrRealismSnapshot | None":
+    """Build the one-row realism check used by main.py's Plan Snapshot.
+    Returns None on import failure so callers degrade gracefully."""
+    try:
+        from models import CagrRealismSnapshot
+    except ImportError:
+        return None
 
-    # Nominal target at retirement
-    target_monthly_nom = target_monthly * (1.0 + inflation) ** horizon_yrs
-    target_annual_nom  = target_monthly_nom * 12.0
+    cape_nom = forward_summary.get("cape_nominal_cagr") if forward_summary else None
 
-    # Required portfolio: bond income + stock withdrawal = target_annual
-    combined_rate     = stock_pct * withdrawal_rate + bonds_pct * yield_bonds * (1.0 - bond_tax)
-    initial_portfolio = target_annual_nom / combined_rate
-    init_stock        = initial_portfolio * stock_pct
-    init_bond         = initial_portfolio * bonds_pct
+    # S&P 500 10y rolling EUR P50/P5 — convert to EUR first, then roll.
+    sp_p50 = sp_p5 = None
+    sp500_native = benchmark_prices.get("^GSPC", (None, None))[0]
+    if sp500_native is not None:
+        sp_eur = convert_to_eur(sp500_native, "USD", fx_cache.get("USD"))
+        if sp_eur is not None and len(sp_eur) > 0:
+            sp_eur = sp_eur.copy()
+            sp_eur.index = pd.to_datetime(sp_eur.index).normalize()
+            sp_eur = sp_eur[~sp_eur.index.duplicated(keep="last")]
+            cagrs = _rolling_cagrs(sp_eur, 10)
+            if cagrs is not None and len(cagrs) > 0:
+                sp_p50 = float(np.percentile(cagrs, 50))
+                sp_p5  = float(np.percentile(cagrs, 5))
 
-    # Two-phase stress return distribution (geom → arith)
-    phase1_mean = lost["cagr"] + 0.5 * lost["vol"] ** 2
-    phase2_mean = rec["cagr"]  + 0.5 * rec["vol"]  ** 2
-    phase1_std  = lost["vol"]
-    phase2_std  = rec["vol"]
-    phase1_yrs  = min(10, n_years)
-    phase2_yrs  = max(0, n_years - phase1_yrs)
+    # Optimised ETF P50/P5 — pick the SAME row the table's ★ marks: highest
+    # rank by tuple score (P5_available, P5/P50/CAGR). Previously this picked
+    # the largest-k sweep row, which could disagree with the recommendation.
+    def _score(s: "PortfolioStrategy") -> tuple[int, float]:
+        if s.portfolio_cagr_p5 is not None:
+            return (1, s.portfolio_cagr_p5)
+        if s.portfolio_cagr_p50 is not None:
+            return (0, s.portfolio_cagr_p50)
+        return (0, s.portfolio_cagr)
 
-    # Baseline: config CAGR (geom → arith)
-    base_mean = stock_cagr + 0.5 * stock_std ** 2
+    candidates: list[PortfolioStrategy] = []
+    if opt_result is not None:
+        s = opt_result.strategies.get(sweep_strategy)
+        if s is not None:
+            candidates.append(s)
+    if sweep:
+        for _k, sub in sweep:
+            s = sub.strategies.get(sweep_strategy)
+            if s is not None:
+                candidates.append(s)
+    etf_p50 = etf_p5 = None
+    if candidates:
+        pick = max(candidates, key=_score)
+        etf_p50 = pick.portfolio_cagr_p50
+        etf_p5  = pick.portfolio_cagr_p5
 
-    rng = np.random.default_rng(44)
-
-    def _make_returns(means_stds: list[tuple[float, float, int]]) -> np.ndarray:
-        parts = [
-            np.maximum(rng.normal(m, s, (n_simulations, y)), -0.99)
-            for m, s, y in means_stds if y > 0
-        ]
-        return np.concatenate(parts, axis=1)
-
-    infl_r = np.maximum(rng.normal(inflation, 0.01, (n_simulations, n_years)), 0.0)
-    bond_r = np.maximum(rng.normal(yield_bonds, 0.005, (n_simulations, n_years)), 0.0)
-
-    stress_stock_r   = _make_returns([(phase1_mean, phase1_std, phase1_yrs),
-                                      (phase2_mean, phase2_std, phase2_yrs)])
-    baseline_stock_r = _make_returns([(base_mean, stock_std, n_years)])
-
-    common = dict(
-        bond_r=bond_r, infl_r=infl_r,
-        initial_stock=init_stock, initial_bond=init_bond,
-        initial_monthly_wd=target_monthly_nom,
-        n_years=n_years, bond_tax=bond_tax,
-        pension_monthly=pension_monthly, pension_start_yr=pension_start_yr,
-        pension_adj=pension_adj, stock_pct_start=stock_pct,
-        glide_end_pct=glide_end_pct, glide_yrs=glide_yrs,
-    )
-    stress_surv,   stress_ruin_yr,   stress_pf   = _decum_sim(stress_stock_r,   **common)
-    baseline_surv, baseline_ruin_yr, baseline_pf = _decum_sim(baseline_stock_r, **common)
-
-    W = 70
-    print(f"{'SORR STRESS TEST — LOST DECADE STARTS AT RETIREMENT':^{W}}")
-    print(f"  Worst case: you retire into 2000-2009 conditions, followed by a recovery.")
-    print(f"    Phase 1 — {phase1_yrs:2d}yr lost decade : "
-          f"mean={phase1_mean*100:+.1f}%  σ={phase1_std*100:.1f}%  ({lost['yr_from']}–{lost['yr_to']})")
-    if phase2_yrs > 0:
-        print(f"    Phase 2 — {phase2_yrs:2d}yr recovery    : "
-              f"mean={phase2_mean*100:+.1f}%  σ={phase2_std*100:.1f}%  ({rec['yr_from']}–{rec['yr_to']})")
-    print()
-    print(f"    Reference retirement portfolio : €{initial_portfolio:>10,.0f}")
-    print(f"    Stock ({stock_pct*100:.0f}%)  :  €{init_stock:>10,.0f}  "
-          f"→ {withdrawal_rate*100:.1f}% withdrawal = €{init_stock*withdrawal_rate/12:,.0f}/mo")
-    print(f"    Bonds ({bonds_pct*100:.0f}%)  :  €{init_bond:>10,.0f}  "
-          f"→ {yield_bonds*(1-bond_tax)*100:.2f}% net yield = €{init_bond*yield_bonds*(1-bond_tax)/12:,.0f}/mo")
-    print(f"    Monthly withdrawal target (nominal) : €{target_monthly_nom:,.0f}")
-    print(f"    Pension from year {pension_start_yr}  :  €{pension_monthly:,.0f}/mo")
-    print(f"    Decumulation horizon : {n_years}yr  |  {n_simulations:,} simulations")
-    print()
-    print(f"    {'':22}  {'Stress (lost decade)':>21}  {'Baseline (config)':>18}")
-    print(f"    {'─' * 64}")
-    print(f"    {'Survival rate (' + str(n_years) + 'yr)':22}  "
-          f"  {stress_surv*100:>18.1f}%  {baseline_surv*100:>16.1f}%")
-    if stress_ruin_yr:
-        print(f"    {'Median ruin year':22}  {'year ' + str(stress_ruin_yr) + ' of retirement':>21}  "
-              f"{'—' if not baseline_ruin_yr else 'year ' + str(baseline_ruin_yr):>18}")
-    print()
-    print(f"    Portfolio value P5 / P50 / P95  (k€, all paths):")
-    print(f"    {'Year':>6}  {'Stress P5':>10}  {'Stress P50':>11}  {'Stress P95':>11}  "
-          f"{'Base P50':>10}")
-    for yr in sorted(set(stress_pf) & set(baseline_pf)):
-        if yr <= n_years:
-            sp5, sp50, sp95 = (np.percentile(stress_pf[yr], p) / 1e3 for p in (5, 50, 95))
-            bp50 = np.percentile(baseline_pf[yr], 50) / 1e3
-            print(f"    {yr:>6}  {sp5:>10.0f}  {sp50:>11.0f}  {sp95:>11.0f}  {bp50:>10.0f}")
-    print()
-
-    return stress_surv, baseline_surv
-
-
-def print_plan_verdict(
-    cfg_raw: dict,
-    cape_ratio: float | None = None,
-    cape_long_run_mean: float = 17.0,
-    cape_eps_growth: float = 0.015,
-    sorr_stress_survival: float | None = None,
-    sorr_baseline_survival: float | None = None,
-    joint_survival_rate: float | None = None,
-) -> "PlanVerdictSummary":
-    """Single-page synthesis: current position, target, gap, verdict, top risks."""
-    horizon_yrs     = int(cfg_raw.get("years", 15))
-    inflation       = float(cfg_raw.get("expected_inflation_percent", 2.3)) / 100
-    target_monthly  = float(cfg_raw.get("target_monthly_retirement_income", 3300.0))
-    withdrawal_rate = float(cfg_raw.get("withdrawal_percentage_stock", 2.8)) / 100
-    bonds_pct       = float(cfg_raw.get("bonds_percentage", 50.0)) / 100
-    stock_pct       = 1.0 - bonds_pct
-    yield_bonds     = float(cfg_raw.get("yield_bonds", 3.4)) / 100
-    bond_tax        = float(cfg_raw.get("tax_rate_bond_italy", 0.125))
-    stock_cagr      = float(cfg_raw.get("expected_yearly_growth_stocks_percent", 6.0)) / 100
-    stocks          = float(cfg_raw.get("current_stock_value", 0.0))
-    bonds_val       = float(cfg_raw.get("current_bonds_value", 0.0))
-    cash            = float(cfg_raw.get("current_cash", 0.0))
-    reserve         = float(cfg_raw.get("cash_reserve_at_horizon", 0.0))
-    annual_saving   = float(cfg_raw.get("annual_net_saving", 0.0))
-
-    deployable       = cash - reserve
-    total_assets     = stocks + bonds_val + cash
-    total_investable = stocks + bonds_val + deployable
-
-    # CAPE-implied stock CAGR
-    cape_stock_cagr: float | None = None
-    if cape_ratio and cape_ratio > 0:
-        ey        = 1.0 / cape_ratio
-        reversion = (cape_long_run_mean / cape_ratio) ** (1.0 / horizon_yrs) - 1.0
-        real_cagr = ey + cape_eps_growth + reversion
-        cape_stock_cagr = (1.0 + real_cagr) * (1.0 + inflation) - 1.0
-
-    # Required retirement portfolio
-    infl_factor       = (1.0 + inflation) ** horizon_yrs
-    target_annual_nom = target_monthly * 12.0 * infl_factor
-    combined_rate     = stock_pct * withdrawal_rate + bonds_pct * yield_bonds * (1.0 - bond_tax)
-    required_portfolio = target_annual_nom / combined_rate
-
-    # Projection: FV of current investable + FV of annual savings, blended CAGR
-    def _project(s_cagr: float) -> float:
-        blended = stock_pct * s_cagr + bonds_pct * yield_bonds
-        fv_assets  = total_investable * (1.0 + blended) ** horizon_yrs
-        fv_savings = (
-            annual_saving * ((1.0 + blended) ** horizon_yrs - 1.0) / blended
-            if blended > 1e-9 else annual_saving * horizon_yrs
-        )
-        return fv_assets + fv_savings
-
-    proj_base = _project(stock_cagr)
-    proj_cape = _project(cape_stock_cagr) if cape_stock_cagr is not None else None
-
-    W = 70
-    print(f"{'PLAN VERDICT':^{W}}")
-    print()
-
-    # Current assets
-    print(f"  Current assets")
-    print(f"    Stocks                 :  €{stocks:>10,.0f}")
-    print(f"    Bonds                  :  €{bonds_val:>10,.0f}")
-    print(f"    Cash                   :  €{cash:>10,.0f}  (€{reserve:,.0f} kept as reserve)")
-    print(f"    {'─' * 42}")
-    print(f"    Total                  :  €{total_assets:>10,.0f}")
-    print(f"    Investable (excl. res.):  €{total_investable:>10,.0f}")
-    print(f"    Annual saving          :  €{annual_saving:>10,.0f}  (€{annual_saving/12:,.0f}/mo)")
-    print()
-
-    # Target
-    print(f"  Retirement target  (horizon {horizon_yrs}yr  |  inflation {inflation*100:.1f}%/yr)")
-    print(f"    Monthly income today         :  €{target_monthly:>8,.0f}")
-    print(f"    Monthly income nominal       :  €{target_monthly * infl_factor:>8,.0f}")
-    print(f"    Required portfolio           :  €{required_portfolio:>10,.0f}")
-    print(f"      ({stock_pct*100:.0f}% stocks @ {withdrawal_rate*100:.1f}% SWR  +  "
-          f"{bonds_pct*100:.0f}% bonds @ {yield_bonds*(1-bond_tax)*100:.2f}% net)")
-    print()
-
-    # Projections
-    blended_base = stock_pct * stock_cagr + bonds_pct * yield_bonds
-    print(f"  Projected portfolio at horizon  (blended CAGR = {blended_base*100:.1f}%)")
-    gap_base = proj_base - required_portfolio
-    sign_b   = "+" if gap_base >= 0 else "−"
-    print(f"    Config  ({stock_cagr*100:.1f}% stock CAGR)  →  "
-          f"€{proj_base:>10,.0f}   gap {sign_b}€{abs(gap_base):,.0f}")
-    if proj_cape is not None:
-        blended_cape = stock_pct * cape_stock_cagr + bonds_pct * yield_bonds
-        gap_cape = proj_cape - required_portfolio
-        sign_c   = "+" if gap_cape >= 0 else "−"
-        print(f"    CAPE    ({cape_stock_cagr*100:.1f}% stock CAGR)  →  "
-              f"€{proj_cape:>10,.0f}   gap {sign_c}€{abs(gap_cape):,.0f}")
-    print()
-
-    # Verdict
-    print(f"  {'─' * 56}")
-    if gap_base >= 0:
-        margin = gap_base / required_portfolio * 100
-        print(f"  VERDICT  ✓  ON TRACK")
-        print(f"    Projected surplus {margin:.0f}% above target at config CAGR ({stock_cagr*100:.1f}%).")
-        if proj_cape is not None and gap_cape >= 0:
-            print(f"    Remains in surplus even at CAPE-implied returns ({cape_stock_cagr*100:.1f}%).")
-        elif proj_cape is not None:
-            extra_mo = abs(gap_cape) * withdrawal_rate / 12
-            print(f"    ⚠ Under CAPE scenario: shortfall €{abs(gap_cape):,.0f}"
-                  f" (≈ €{extra_mo:,.0f}/mo extra contribution needed).")
-    else:
-        extra_mo = abs(gap_base) * withdrawal_rate / 12
-        print(f"  VERDICT  ✗  SHORTFALL EXPECTED")
-        print(f"    Gap of €{abs(gap_base):,.0f} at config CAGR."
-              f"  Close it with ≈ €{extra_mo:,.0f}/mo extra contribution.")
-    if joint_survival_rate is not None:
-        print(f"    Joint P(accumulate AND survive 40 yr) : {joint_survival_rate*100:.1f}%"
-              f"  (chained MC — no independence assumption)")
-    print()
-
-    # Top risks
-    print(f"  Top risks:")
-    risk_n = 1
-    if cape_ratio and cape_stock_cagr is not None:
-        print(f"    {risk_n}. Valuation (CAPE {cape_ratio:.0f}): stock forward CAGR may be "
-              f"{cape_stock_cagr*100:.1f}% vs {stock_cagr*100:.1f}% in plan.")
-        risk_n += 1
-    if sorr_stress_survival is not None:
-        delta = (sorr_baseline_survival or 1.0) - sorr_stress_survival
-        print(f"    {risk_n}. SORR: a lost decade starting at retirement cuts survival from "
-              f"{(sorr_baseline_survival or 1)*100:.0f}% to {sorr_stress_survival*100:.0f}%"
-              f" (−{delta*100:.0f}pp). See SORR section above.")
-        risk_n += 1
-    extra_infl = target_monthly * 12.0 * horizon_yrs * 0.01
-    print(f"    {risk_n}. Inflation: each +1pp above {inflation*100:.1f}%/yr adds"
-          f" ≈ €{extra_infl:,.0f} to the total retirement cost.")
-    print()
-
-    from models import PlanVerdictSummary
-    return PlanVerdictSummary(
-        required_portfolio=required_portfolio,
-        projected_portfolio_config=proj_base,
-        projected_portfolio_cape=proj_cape,
-        gap_config=gap_base,
-        on_track=gap_base >= 0,
-        joint_survival_rate=joint_survival_rate,
+    return CagrRealismSnapshot(
+        cape_nominal_cagr=cape_nom,
+        sp500_10y_rolling_eur_p50=sp_p50,
+        sp500_10y_rolling_eur_p5=sp_p5,
+        optimised_etf_p50=etf_p50,
+        optimised_etf_p5=etf_p5,
     )
 
 
@@ -2264,19 +2083,21 @@ def main() -> None:
         help="which analysis to run (default: full)",
     )
     parser.add_argument("--verbose", "-v", action="store_true",
-                        help="print detailed tables (rolling windows, correlation, optimiser weights)")
-    parser.add_argument("--agent", action="store_true",
-                        help="print AI agent key observations and metric guide")
+                        help="print detailed tables (final summary, benchmarks, era analysis, forward, correlation)")
     parser.add_argument("--no-advanced-optimization", action="store_false", dest="advanced_opt",
                         help="disable Bayesian shrinkage (OAS covariance + James-Stein means) in optimizer")
     parser.add_argument("--no-clear", action="store_true",
                         help="suppress terminal clear (used when called from main.py)")
+    parser.add_argument("--cagr", default=None,
+                        help="override stock CAGR for the realism check display "
+                             "(accepts 4, 4.0, 0.04, '4%%'); per-run only")
     parser.set_defaults(advanced_opt=True)
     args = parser.parse_args()
     verbose  = args.verbose
-    agent    = args.agent
     analysis = args.analysis
     advanced_opt = args.advanced_opt
+    from models import Config as _CfgParser
+    cli_planning_cagr_override = _CfgParser.parse_planning_cagr(args.cagr)
 
     run_cagr      = analysis in ("cagr", "optimizer", "full")
     run_optimizer = analysis in ("optimizer", "full")
@@ -2286,7 +2107,7 @@ def main() -> None:
     if not args.no_clear:
         os.system("cls" if os.name == "nt" else "clear")
 
-    print(f"{'SINGLE ETF CAGR ANALYSIS  —  ROLLING DAILY WINDOWS  (EUR-adjusted)':^70}")
+    print("SINGLE ETF CAGR ANALYSIS  —  ROLLING DAILY WINDOWS  (EUR-adjusted)")
     if verbose:
         print(f"  Instruments: {len(TICKERS)} total  ({len(EU_TICKERS)} EU-eligible ✓, {len(US_TICKERS)} US-listed)")
         print(f"  Windows    : {', '.join(_window_label(y) for y in WINDOW_YEARS)}")
@@ -2311,6 +2132,8 @@ def main() -> None:
         cape_n_simulations: int           = int(_raw_cfg.get("cape_n_simulations", 50_000))
         horizon_years: int                = int(_raw_cfg.get("years", 15))
         inflation: float                  = float(_raw_cfg.get("expected_inflation_percent", 2.3)) / 100
+        config_stock_cagr: float          = float(_raw_cfg.get("expected_yearly_growth_stocks_percent", 6.0)) / 100
+        planning_cagr_override: float | None = cli_planning_cagr_override
         _initial_stock: float             = float(_raw_cfg.get("current_stock_value", 0.0))
         _annual_saving: float             = float(_raw_cfg.get("annual_net_saving", 0.0))
         _stock_pct: float                 = float(_raw_cfg.get("maximum_stock_monthly_investment_pct", 0.0))
@@ -2328,6 +2151,8 @@ def main() -> None:
         cape_n_simulations     = 50_000
         horizon_years          = 15
         inflation              = 0.023
+        config_stock_cagr      = 0.06
+        planning_cagr_override = None
         _initial_stock         = 0.0
         dca_monthly            = 0.0
         opt_cfg                = {}
@@ -2409,49 +2234,9 @@ def main() -> None:
 
         if verbose:
             print()
-            print(f"{'SUMMARY — MEAN ROLLING CAGR BY WINDOW  (all prices in EUR)':^70}")
-            print(f"  Sorted by {ref_label} mean CAGR  |  Min/Max = worst/best {ref_label} period ever")
-            print(f"  EU✓ = UCITS ETF available to EU retail investors\n")
-            print_summary_table(results)
-
-            print()
-            print(f"{'DETAIL — RANKED BY MEAN CAGR PER WINDOW':^70}")
-            print("  Min = worst N-year period | Max = best | Ann.σ = daily vol (EUR)")
-            for years in WINDOW_YEARS:
-                print_detail_table(results, years)
-
-        print()
-        print(f"{'FINAL SUMMARY — KEY METRICS AT A GLANCE':^70}")
-        print(f"  Ranked by {ref_label} mean CAGR  |  Cons. = mean÷std (timing consistency)\n")
-        print_final_summary(results)
-
-        if agent:
-            print()
-            print_analysis_notes(results)
-
-        if verbose:
-            print()
-            print(f"{'NOTES':^70}")
-            print("  Std CAGR: std dev of rolling N-year CAGRs across all daily start dates.")
-            print("            Measures entry-point timing risk: how much the N-year outcome")
-            print("            varies depending on when you started. Low std = consistent.")
-            print()
-            print("  P5/P25  : 5th and 25th percentile of rolling CAGRs. P5 is the conservative")
-            print("            planning input — 95% of all entry dates beat this return.")
-            print("            More robust than Min (which can be a single outlier period).")
-            print()
-            print("  MDD     : max peak-to-trough drawdown in EUR. E.g. -55% means the ETF")
-            print("            lost 55% from its high at worst. Key input for SORR assessment.")
-            print()
-            print("  σ-5y / σ-10y / σ-all: annualised daily log-return vol over last 5 years,")
-            print("            last 10 years, and full available history. σ-5y feeds Monte Carlo.")
-            print()
-            print("  EUR pricing: UCITS ETFs (.DE/.AS) are NAV-priced in EUR — price already")
-            print("  embeds EUR/USD. US ETFs converted via EURUSD=X / GBPEUR=X historical rates.")
-            print()
-            print("  MiFID II / PRIIPs: EU retail investors cannot buy US-domiciled ETFs")
-            print("  (SPY, QQQ, VTI, VEA, VWO) directly. Shown as benchmarks only.")
-            print()
+            print(f"FINAL SUMMARY — KEY METRICS AT A GLANCE:")
+            print(f"  Ranked by {ref_label} mean CAGR  |  Cons. = mean÷std (timing consistency)\n")
+            print_final_summary(results)
 
             print()
             print(f"{'CORRELATION MATRIX — PAIRWISE PEARSON  (EUR daily log returns)':^70}")
@@ -2542,24 +2327,28 @@ def main() -> None:
             rolling_eur = compute_benchmark_rolling(clipped_eur)
             eur_data.append((bticker, clipped_eur, "EUR", rolling_eur))
 
-        print()
-        print_benchmark_table(
-            native_data,
-            title="BENCHMARK INDICES — ROLLING CAGR (native currency, full history)",
-            note="Native currency — no EUR conversion. Avoids EURUSD=X 2003 truncation. Use for long-window plausibilization.",
-        )
-        print_benchmark_table(
-            eur_data,
-            title="BENCHMARK INDICES — ROLLING CAGR (EUR-converted, 2003+)",
-            note="EUR-converted via EURUSD=X. Shows actual EUR investor experience including FX impact.",
-        )
-        print_benchmark_era_table(
-            native_data,
-            era_horizon_year=benchmark_era_horizon_year,
-            horizon_years=horizon_years,
-        )
+        if verbose:
+            print()
+            print_benchmark_table(
+                native_data,
+                title="BENCHMARK INDICES — ROLLING CAGR (native currency, full history)",
+                note="Native currency — no EUR conversion. Avoids EURUSD=X 2003 truncation. Use for long-window plausibilization.",
+            )
+            print_benchmark_table(
+                eur_data,
+                title="BENCHMARK INDICES — ROLLING CAGR (EUR-converted, 2003+)",
+                note="EUR-converted via EURUSD=X. Shows actual EUR investor experience including FX impact.",
+            )
+            print_benchmark_era_table(
+                native_data,
+                era_horizon_year=benchmark_era_horizon_year,
+                horizon_years=horizon_years,
+            )
 
-    # ── Forward CAGR estimates ────────────────────────────────────────────────
+    # ── Forward CAGR estimates (always compute; print gated by verbose) ─────
+    # SORR / decumulation survival lives in main_decumulation.py — this script
+    # only models the accumulation-CAGR side.
+    forward_summary: dict = {}
     if run_forward and benchmark_prices:
         if not native_data:
             def _clip(prices: pd.Series) -> pd.Series:
@@ -2573,8 +2362,9 @@ def main() -> None:
                 rolling = compute_benchmark_rolling(clipped)
                 native_data.append((bticker, clipped, bccy, rolling))
 
-        print()
-        print_forward_cagr_estimates(
+        if verbose:
+            print()
+        forward_summary = print_forward_cagr_estimates(
             native_data,
             horizon_years=horizon_years,
             inflation=inflation,
@@ -2584,67 +2374,33 @@ def main() -> None:
             n_simulations=cape_n_simulations,
             initial_stock=_initial_stock,
             monthly_contribution=dca_monthly,
-        )
-        print()
-        sorr_stress, sorr_baseline = print_sorr_stress_test(
-            native_data, cfg_raw, n_simulations=cape_n_simulations
-        )
-    else:
-        sorr_stress, sorr_baseline = None, None
-
-    # ── Chained MC for plan verdict ───────────────────────────────────────────
-    joint_survival: float | None = None
-    if run_forward and cfg_raw:
-        try:
-            from models import Config as _Cfg
-            from monte_carlo import compute_chained_mc as _chained_mc
-            _c = _Cfg.from_dict(cfg_raw)
-            _mo_s = _c.annual_net_saving / 12 * _c.maximum_stock_monthly_investment_pct
-            _mo_b = _c.annual_net_saving / 12 * _c.maximum_bonds_monthly_investment_pct
-            _inf = (1 + _c.expected_inflation_percent / 100) ** _c.years
-            _ann = _c.target_monthly_retirement_income * 12 * _inf
-            _sp = 1.0 - _c.bonds_percentage / 100
-            _bp = _c.bonds_percentage / 100
-            _rate = _sp * _c.withdrawal_percentage_stock / 100 + _bp * _c.yield_bonds / 100 * (1 - _c.tax_rate_bond_italy)
-            _req = _ann / _rate
-            joint_survival = _chained_mc(
-                config=_c,
-                monthly_stock_contribution=_mo_s,
-                monthly_bond_contribution=_mo_b,
-                required_portfolio=_req,
-                n_paths=5_000,
-            ).joint_survival_rate
-        except Exception:
-            joint_survival = None
-
-    # ── Final portfolio summary ───────────────────────────────────────────────
-    if opt_result:
-        sp500_prices = next(
-            (prices for t, prices, _, _ in native_data if t == "^GSPC"), None
-        )
-        print()
-        print_portfolio_final_summary(
-            opt_result,
-            strategy_key=sweep_strategy,
-            sweep=sweep,
-            sp500_prices=sp500_prices,
+            verbose=verbose,
         )
 
-    # ── Plan verdict ──────────────────────────────────────────────────────────
-    plan_verdict = None
-    if cfg_raw:
-        print()
-        plan_verdict = print_plan_verdict(
-            cfg_raw,
-            cape_ratio=cape_ratio,
-            cape_long_run_mean=cape_long_run_mean,
-            cape_eps_growth=cape_eps_growth,
-            sorr_stress_survival=sorr_stress,
-            sorr_baseline_survival=sorr_baseline,
-            joint_survival_rate=joint_survival,
-        )
+    # ── TAKE AWAY (always printed) ────────────────────────────────────────────
+    print()
+    print_take_away(
+        forward_summary=forward_summary,
+        native_data=native_data,
+        opt_result=opt_result,
+        sweep=sweep,
+        sweep_strategy=sweep_strategy,
+        horizon_years=horizon_years,
+        config_stock_cagr=config_stock_cagr,
+        fx_cache=fx_cache,
+        planning_cagr_override=planning_cagr_override,
+    )
 
-    return results, opt_result, plan_verdict
+    # ── Realism snapshot (for Plan Snapshot in main.py) ───────────────────────
+    realism = _build_realism_snapshot(
+        forward_summary=forward_summary,
+        benchmark_prices=benchmark_prices,
+        fx_cache=fx_cache,
+        opt_result=opt_result,
+        sweep=sweep,
+        sweep_strategy=sweep_strategy,
+    )
+    return results, opt_result, realism
 
 
 if __name__ == "__main__":

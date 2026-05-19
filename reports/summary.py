@@ -4,6 +4,7 @@ from models import (
     Config,
     ContributionCagrGrid,
     CombinedGrid,
+    FinancialFreedomResult,
     MonteCarloResult,
     OptimalAllocationResult,
     ProjectionResult,
@@ -386,6 +387,10 @@ def print_takeaway(
     target_success: float,
     future_monthly_income: float,
     target_annual_net_income: float,
+    years_de: YearsToTargetsResult | None = None,
+    years_it: YearsToTargetsResult | None = None,
+    ff_de: FinancialFreedomResult | None = None,
+    ff_it: FinancialFreedomResult | None = None,
 ) -> None:
     assumed = config.expected_yearly_growth_stocks_percent / 100
     target_pct = int(round(target_success * 100))
@@ -412,6 +417,7 @@ def print_takeaway(
     s_mo = monthly_saving * config.maximum_stock_monthly_investment_pct
     b_mo = monthly_saving * config.maximum_bonds_monthly_investment_pct
     c_mo = max(0.0, monthly_saving - s_mo - b_mo)
+    current_year = datetime.date.today().year
     print(f"  2. Current situation  (target success ≥ {target_pct}% over {years}y)")
     print(f"     Portfolio : {format_currency(total)}"
           f"  (stocks {format_currency(config.current_stock_value)}"
@@ -421,7 +427,15 @@ def print_takeaway(
           f"  ⇒ stocks {format_currency(s_mo)}/mo"
           f" · bonds {format_currency(b_mo)}/mo"
           f" · cash {format_currency(c_mo)}/mo")
-    for mc in (mc1, mc2):
+
+    def _yr_seg(label: str, yrs: int | None) -> str:
+        if yrs is None:
+            return f"{label} not achievable"
+        delta = yrs - years
+        sign = "+" if delta >= 0 else ""
+        return f"{label} {current_year + yrs} ({sign}{delta}y vs plan)"
+
+    for mc, yrs_target, ff in ((mc1, years_de, ff_de), (mc2, years_it, ff_it)):
         tag = mc.name.split()[-1].strip("()")
         flag_p = "✓" if mc.success_rate >= target_success else "✗"
         flag_i = "✓" if mc.success_rate_income_only >= target_success else "✗"
@@ -429,6 +443,18 @@ def print_takeaway(
               f"  (stocks {mc.success_rate_stock_only * 100:.1f}%"
               f" · bonds {mc.success_rate_bond_only * 100:.1f}%)"
               f"  · income {flag_i} {mc.success_rate_income_only * 100:>4.1f}%")
+        # Sub-row: years needed at current contributions.
+        #   portfolio  = stocks AND bonds each ≥ required allocation (Q1 sense)
+        #   net income = portfolio income ≥ target, with year-specific
+        #                taxable-gain accounting via ff (more accurate than
+        #                the constant effective_stock_tax_rate used in
+        #                years_to_targets.years_to_income).
+        if yrs_target is not None or ff is not None:
+            yrs_both = yrs_target.years_to_both if yrs_target is not None else None
+            yrs_inc  = ff.years if ff is not None else None
+            print(f"          reaches {target_pct}% in: "
+                  f"{_yr_seg('portfolio', yrs_both)}"
+                  f"  ·  {_yr_seg('net income', yrs_inc)}")
     print()
 
     # 3. Reach TARGET ALLOCATION

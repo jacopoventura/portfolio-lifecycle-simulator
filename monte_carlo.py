@@ -229,7 +229,7 @@ def run_monte_carlo_simulation(
     initial_cash_override: float | None = None,
 ) -> MonteCarloResult:
     years = int(round(config.years))
-    stock_mean = stock_mean_override if stock_mean_override is not None else config.expected_yearly_growth_stocks_percent / 100
+    stock_mean = stock_mean_override if stock_mean_override is not None else config.planning_cagr
     initial_stock = initial_stock_override if initial_stock_override is not None else config.current_stock_value
     initial_bonds = initial_bonds_override if initial_bonds_override is not None else config.current_bonds_value
     initial_cash = initial_cash_override if initial_cash_override is not None else config.current_cash
@@ -463,7 +463,7 @@ def compute_years_to_financial_freedom_mc(
     max_years: int = 40,
 ) -> FinancialFreedomResult:
     tail_pct = 100 - config.mc_target_success_percent
-    stock_mean = config.expected_yearly_growth_stocks_percent / 100
+    stock_mean = config.planning_cagr
     cost_basis = config.current_stock_value - config.current_stock_unrealized_gain
 
     mc = _setup_mc(
@@ -535,7 +535,7 @@ def compute_years_to_targets_mc(
     seed: int = 42,
     max_years: int = 40,
 ) -> YearsToTargetsResult:
-    stock_mean = config.expected_yearly_growth_stocks_percent / 100
+    stock_mean = config.planning_cagr
     bonds_weight = scenario.bonds_percentage / 100
     stocks_weight = 1.0 - bonds_weight
 
@@ -1073,7 +1073,7 @@ def compute_sensitivity_waterfall(
     seed: int = 42,
     n_workers: int | None = None,
 ) -> SensitivityWaterfallResult:
-    cagr = config.expected_yearly_growth_stocks_percent / 100
+    cagr = config.planning_cagr
 
     # Each tuple: (param_name, base_value_str, delta_label, up_args, dn_args)
     # Args format matches _mc_grid_worker: (config, scenario, n_sims, stock_std, inflation_std, seed, smo, bmo, cagr)
@@ -1081,7 +1081,9 @@ def compute_sensitivity_waterfall(
         return (cfg, scenario, n_simulations, ss, inflation_std, seed, smo, bmo, sm)
 
     param_defs = [
-        ("Stock CAGR", f"{config.expected_yearly_growth_stocks_percent:.1f}%", "±2pp",
+        # Display the planning CAGR (override-aware) — that's the centre point
+        # of the ±2pp sensitivity perturbation below.
+        ("Stock CAGR", f"{config.planning_cagr*100:.1f}%", "±2pp",
          _a(sm=cagr + 0.02),
          _a(sm=max(0.001, cagr - 0.02))),
 
@@ -1242,7 +1244,7 @@ def compute_inflation_cagr_grid(
         scenario_name=scenario.name,
         cagr_values=cagr_values,
         inflation_values=_INFLATION_VALUES,
-        base_cagr=config.expected_yearly_growth_stocks_percent / 100.0,
+        base_cagr=config.planning_cagr,
         base_inflation=config.expected_inflation_percent / 100.0,
         monthly_stocks=monthly_stocks,
         monthly_bonds=monthly_bonds,
@@ -1311,7 +1313,7 @@ def compute_decum_inflation_cagr_grid(
         display_portfolio=display_portfolio,
         cagr_values=cagr_values,
         inflation_values=_INFLATION_VALUES,
-        base_cagr=config.expected_yearly_growth_stocks_percent / 100.0,
+        base_cagr=config.planning_cagr,
         base_inflation=config.expected_inflation_percent / 100.0,
         grid=grid,
     )
@@ -1341,6 +1343,7 @@ def _run_decum_loop(
     pension_adjustment_rate: float = 0.0,
     stock_pct_end: float = -1.0,
     glide_years: int = 0,
+    effective_stock_tax_rate: float = 0.0,
 ) -> DecumulationResult:
     """Core decumulation year-loop. All simulation work is vectorised.
 
@@ -1412,8 +1415,15 @@ def _run_decum_loop(
         residual = np.maximum(0.0, target_annual - passive_income)
         surplus = np.maximum(0.0, passive_income - target_annual)
 
-        # 7. Deduct / reinvest (alive sims only)
-        stock_v = stock_v - np.where(alive, residual, 0.0)
+        # 7. Deduct / reinvest (alive sims only).
+        # Scale withdrawal up by 1/(1−eff_tax) so we sell enough stock to net
+        # `residual` after capital-gains tax on the gain portion. Otherwise the
+        # simulation silently skips the tax bill and overstates survival.
+        residual_gross = (
+            residual / (1.0 - effective_stock_tax_rate)
+            if effective_stock_tax_rate > 0 else residual
+        )
+        stock_v = stock_v - np.where(alive, residual_gross, 0.0)
         stock_v = stock_v + np.where(alive, surplus, 0.0)
 
         # 8. Fallback: if stocks exhausted, sell bond principal to cover shortfall
@@ -1469,6 +1479,7 @@ def simulate_decumulation(
     glide_end_pct: float | None = None,
     glide_years: int | None = None,
     monthly_withdrawal_override: float | None = None,
+    effective_stock_tax_rate: float | None = None,
 ) -> DecumulationResult:
     sa  = stock_allocation if stock_allocation is not None else config.mc_decumulation_stock_pct
     ny  = n_years          if n_years          is not None else config.mc_decumulation_years
@@ -1478,11 +1489,18 @@ def simulate_decumulation(
     btr = bond_tax_rate    if bond_tax_rate    is not None else config.tax_rate_bond_italy
     gep = glide_end_pct    if glide_end_pct    is not None else config.mc_decumulation_glide_end_pct
     gyr = glide_years      if glide_years      is not None else config.mc_decumulation_glide_years
+    # Capital-gains tax on stock withdrawals. Default = gain-fraction proxy 0.65
+    # (typical for a long-held stock portfolio) × teilfreistellung × tax_rate.
+    # The sizing functions use the same convention; this matches them in the loop.
+    est = (
+        effective_stock_tax_rate if effective_stock_tax_rate is not None
+        else 0.65 * config.teilfreistellung * config.tax_rate
+    )
 
     rng = np.random.default_rng(seed)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
-        config.expected_yearly_growth_stocks_percent / 100, ss,
+        config.planning_cagr, ss,
         config.expected_inflation_percent / 100, is_,
         config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
@@ -1514,6 +1532,7 @@ def simulate_decumulation(
         pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
         stock_pct_end=gep,
         glide_years=gyr,
+        effective_stock_tax_rate=est,
     )
 
 
@@ -1575,7 +1594,7 @@ def compute_sorr_scenarios(
     rng = np.random.default_rng(seed)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
-        config.expected_yearly_growth_stocks_percent / 100, ss,
+        config.planning_cagr, ss,
         config.expected_inflation_percent / 100, is_,
         config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
@@ -1606,6 +1625,7 @@ def compute_sorr_scenarios(
         pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
         stock_pct_end=config.mc_decumulation_glide_end_pct,
         glide_years=config.mc_decumulation_glide_years,
+        effective_stock_tax_rate=0.65 * config.teilfreistellung * config.tax_rate,
     )
 
     baseline = _run_decum_loop(annual_stock_returns=stock_returns, **_common)
@@ -1701,7 +1721,7 @@ def compute_allocation_sweep(
     rng = np.random.default_rng(seed)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
-        config.expected_yearly_growth_stocks_percent / 100,
+        config.planning_cagr,
         config.mc_stock_return_std_percent / 100,
         config.expected_inflation_percent / 100,
         config.mc_inflation_std_percent / 100,
@@ -1750,6 +1770,7 @@ def compute_allocation_sweep(
             pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
             stock_pct_end=eff_glide_end,
             glide_years=eff_glide_yrs,
+            effective_stock_tax_rate=effective_stock_tax_rate,
         )
         r_fixed = _run_decum_loop(
             annual_stock_returns=stock_returns, withdrawal_strategy="fixed", **_loop_kw
@@ -1800,7 +1821,7 @@ def compute_chained_mc(
     n = n_paths or config.mc_decumulation_n_simulations
     ny_accum = int(round(config.years))
     ny_decum = config.mc_decumulation_years
-    stock_mean = config.expected_yearly_growth_stocks_percent / 100
+    stock_mean = config.planning_cagr
     bond_yield = config.yield_bonds / 100
     stock_std = config.mc_stock_return_std_percent / 100
     infl_std = config.mc_inflation_std_percent / 100
@@ -1952,7 +1973,7 @@ def compute_swr_sweep(
     rng = np.random.default_rng(seed)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
-        config.expected_yearly_growth_stocks_percent / 100,
+        config.planning_cagr,
         config.mc_stock_return_std_percent / 100,
         config.expected_inflation_percent / 100,
         config.mc_inflation_std_percent / 100,
@@ -1984,6 +2005,7 @@ def compute_swr_sweep(
             pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
             stock_pct_end=config.mc_decumulation_glide_end_pct,
             glide_years=config.mc_decumulation_glide_years,
+            effective_stock_tax_rate=0.65 * config.teilfreistellung * config.tax_rate,
         )
         points.append(SWRSweepPoint(
             swr=swr,

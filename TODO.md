@@ -3,15 +3,11 @@ remember that the goal of all of this project is to understand if I am on track 
 This includes understanding if the target portfolio can survive during the decumulation phase, if the historical market performance match the 
 expected cagr used for portfolio calculation and if I can find a ET>F portfolio to reach this
 
-REPORTING / FI-VERDICT FIXES (ranked by FI-impact)
-1. Unify the required-portfolio definition. Section 1 uses the asset-split formula (€2.07M IT) and prints "WARNING — financial plan must be
-   revised" at 76% success; Plan Verdict uses the income formula (€1.96M) and prints "✓ ON TRACK". Same inputs, contradictory verdicts.
-   Pick one canonical target, or print both side-by-side with explicit labels.
-3. Surface Required stock CAGR next to CAPE forward + S&P 10y rolling EUR + optimised ETF P50/P5, all in one row of Plan Snapshot.
-   Single-glance realism check: "do I need X% and does X% exist in the real world?".
-4. Filter ETF optimiser candidates by P5 != n/a (or flag them). Current best pick (IS3R 19% + QQQ 25% + IGLN 10% + TDIV 46%) shows P5=n/a
+1. [DONE] Surface Required stock CAGR next to CAPE forward + S&P 10y rolling EUR + optimised ETF P50/P5, all in one row of Plan Snapshot. 
+Single-glance realism check: "do I need X% and does X% exist in the real world?".
+2. [DONE] Filter ETF optimiser candidates by P5 != n/a (or flag them). Current best pick (IS3R 19% + QQQ 25% + IGLN 10% + TDIV 46%) shows P5=n/a
    because common history < ~10y. A 40-year decumulation plan should be optimised on P5 survival, not P50.
-5. Persist a one-line history log per run (date, required_cagr, joint_P, P50) so drift over time is visible — early warning that the plan
+3. [DONE] Persist a one-line history log per run (date, required_cagr, joint_P, P50) so drift over time is visible — early warning that the plan
    needs revising.
 
 CODE QUALITY

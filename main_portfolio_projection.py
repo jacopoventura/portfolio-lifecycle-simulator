@@ -294,6 +294,9 @@ def _parse_args() -> argparse.Namespace:
                         help="call Claude Haiku to generate 5 prioritised action bullets (requires ANTHROPIC_API_KEY)")
     parser.add_argument("--no-clear", action="store_true",
                         help="suppress terminal clear (used when called from main.py)")
+    parser.add_argument("--cagr", default=None,
+                        help="override stock CAGR for projection / MC planning "
+                             "(accepts 4, 4.0, 0.04, '4%%'); per-run only")
     args, _ = parser.parse_known_args()
     return args
 
@@ -318,7 +321,9 @@ def _compute_all(config: Config, args: argparse.Namespace) -> ReportContext:
     """Run every projection / Monte Carlo / optimization needed for the report.
     Raises ValueError on validation failures (caught by main())."""
     inflation_rate = config.expected_inflation_percent / 100
-    stock_expected_yield = config.expected_yearly_growth_stocks_percent / 100
+    # Use planning_cagr (override-aware) for all projection / MC math; the raw
+    # config baseline is kept for the realism check that surfaces the override.
+    stock_expected_yield = config.planning_cagr
     bonds_yield = config.yield_bonds / 100
     withdrawal_rate = config.withdrawal_percentage_stock / 100
     target_success = config.mc_target_success_percent / 100
@@ -677,6 +682,8 @@ def _render_all(ctx: ReportContext) -> tuple[str, str, str]:
             target_success=ctx.target_success,
             future_monthly_income=ctx.future_monthly_income_value,
             target_annual_net_income=ctx.target_annual_net_income,
+            years_de=ctx.years_de, years_it=ctx.years_it,
+            ff_de=ctx.ff_de, ff_it=ctx.ff_it,
         )
 
     return verbose_report, _capture_stdout(_render_summary), _capture_stdout(_render_takeaway)
@@ -708,6 +715,9 @@ def main() -> tuple[float, float, float | None, int, str, str, str] | None:
     if loaded is None:
         return None
     config, config_toml_text = loaded
+
+    # Apply CLI --cagr override (decimal or percent); no-op when absent
+    config.planning_cagr_override = Config.parse_planning_cagr(args.cagr)
 
     try:
         ctx = _compute_all(config, args)

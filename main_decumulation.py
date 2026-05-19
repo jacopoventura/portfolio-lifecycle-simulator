@@ -48,7 +48,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--no-clear", action="store_true",
                    help="Do not clear terminal before output")
-    return p.parse_args()
+    p.add_argument("--cagr", default=None,
+                   help="override stock CAGR for the decum MC "
+                        "(accepts 4, 4.0, 0.04, '4%%'); per-run only")
+    return p.parse_known_args()[0]
 
 
 def _income_formula_portfolio(config: Config) -> tuple[float, float]:
@@ -110,6 +113,8 @@ def main(
     """
     args = _parse_args()
     config = _load_config(args.config)
+    # Apply CLI --cagr override (decimal or percent); no-op when absent
+    config.planning_cagr_override = Config.parse_planning_cagr(args.cagr)
 
     if not args.no_clear:
         clear_terminal()
@@ -125,7 +130,7 @@ def main(
     pension_note = f"  +{adj * 100:.1f}%/yr" if adj > 0 else "  (fixed nominal)"
     print(f"Withdrawal rate: {config.withdrawal_percentage_stock:.2f}% pa  |  "
           f"Stock allocation: {config.mc_decumulation_stock_pct * 100:.0f}%  |  "
-          f"Stock return μ: {config.expected_yearly_growth_stocks_percent:.1f}%  |  "
+          f"Stock return μ: {config.planning_cagr * 100:.1f}%  |  "
           f"Pension: €{config.mc_decumulation_pension_monthly:,.0f}/mo "
           f"from year {config.mc_decumulation_pension_start_year}{pension_note}")
     print()
