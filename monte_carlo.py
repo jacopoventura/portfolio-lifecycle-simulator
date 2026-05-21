@@ -26,13 +26,16 @@ from models import (
     FinancialFreedomResult,
     InflationCagrCell,
     InflationCagrGrid,
-    JointProbabilityResult,
     MonteCarloResult,
     OptimalAllocationResult,
     ScenarioResult,
     SensitivityEntry,
     SensitivityWaterfallResult,
+    CanonicalFIRequiredRow,
+    CanonicalFIRequiredScan,
     SORRResult,
+    WealthPreservationRow,
+    WealthPreservationUnderSORR,
     YearsToTargetsResult,
 )
 
@@ -41,13 +44,8 @@ _SUGGESTIONS_N_SIMULATIONS = 15_000
 _SUGGESTIONS_SCAN_STEP_MAIN = 1_000.0
 _SUGGESTIONS_SCAN_MAX_STOCK = 15_000.0
 _OPTIMIZE_N_SIMULATIONS = 5_000
-_OPTIMIZE_STEP = 25_000.0
 _OPTIMIZE_MIN_CASH_TODAY = 50_000.0
 _OPTIMIZE_BONDS_LEVELS = 20  # bonds/mo search resolution per upfront cell
-_GRID_N_SIMULATIONS = 15_000
-_GRID_CAGR_MIN = 0.03
-_GRID_CAGR_MAX = 0.09
-_GRID_CAGR_STEP = 0.01
 _GRID_CONTRIBUTION_STEP = 250.0
 _BOND_GRID_STOCK_MAX = 7_000.0
 _BOND_GRID_STOCK_STEP = 1_000.0
@@ -419,7 +417,7 @@ def compute_required_cagr_for_success(
     inflation_std: float,
     fixed_monthly_bonds: float,
     monthly_stock_contribution: float,
-    target_success: float = 0.95,
+    target_success: float,
     seed: int = 42,
     use_income_metric: bool = False,
     use_stock_metric: bool = False,
@@ -457,7 +455,7 @@ def compute_years_to_financial_freedom_mc(
     inflation_std: float,
     monthly_stock: float,
     monthly_bonds: float,
-    target_success: float = 0.95,
+    target_success: float,
     n_simulations: int = _SUGGESTIONS_N_SIMULATIONS,
     seed: int = 42,
     max_years: int = 40,
@@ -530,7 +528,7 @@ def compute_years_to_targets_mc(
     monthly_bonds: float,
     stock_std: float,
     inflation_std: float,
-    target_success: float = 0.95,
+    target_success: float,
     n_simulations: int = _SUGGESTIONS_N_SIMULATIONS,
     seed: int = 42,
     max_years: int = 40,
@@ -769,15 +767,17 @@ def compute_optimal_allocation(
     inflation_std: float,
     current_stocks_mo: float,
     current_bonds_mo: float,
-    target_success: float = 0.95,
+    target_success: float,
     min_cash_today: float = _OPTIMIZE_MIN_CASH_TODAY,
-    step: float = _OPTIMIZE_STEP,
+    step: float | None = None,
     seed: int = 42,
     n_simulations: int = _OPTIMIZE_N_SIMULATIONS,
     n_bond_levels: int = _OPTIMIZE_BONDS_LEVELS,
     n_workers: int | None = None,
     budget_cap: float | None = None,
 ) -> OptimalAllocationResult:
+    if step is None:
+        step = config.optimize_grid_step
     min_cash_today = max(min_cash_today, config.cash_reserve_at_horizon)
     available = max(0.0, config.current_cash - min_cash_today)
     extra_stocks_values = np.arange(0.0, available + step * 0.5, step)
@@ -1260,9 +1260,7 @@ def _mc_decum_inflation_cagr_worker(args: tuple):
         expected_inflation_percent=inflation_pct * 100.0,
     )
     res = simulate_decumulation(cfg, portfolio, seed=seed, n_simulations=n_sims)
-    surv30 = res.survival_by_year[29] if len(res.survival_by_year) >= 30 else 0.0
-    surv40 = res.survival_by_year[39] if len(res.survival_by_year) >= 40 else 0.0
-    return surv30, surv40
+    return res.survival_by_year
 
 
 def compute_decum_inflation_cagr_grid(
@@ -1304,8 +1302,7 @@ def compute_decum_inflation_cagr_grid(
     for _ in _INFLATION_VALUES:
         row: list[DecumInflationCagrCell] = []
         for _ in cagr_values:
-            s30, s40 = raw[idx]
-            row.append(DecumInflationCagrCell(survival_yr30=s30, survival_yr40=s40))
+            row.append(DecumInflationCagrCell(survival_by_year=raw[idx]))
             idx += 1
         grid.append(row)
 
@@ -1315,6 +1312,8 @@ def compute_decum_inflation_cagr_grid(
         inflation_values=_INFLATION_VALUES,
         base_cagr=config.planning_cagr,
         base_inflation=config.expected_inflation_percent / 100.0,
+        horizon_years=config.mc_decumulation_years,
+        pension_start_year=config.mc_decumulation_pension_start_year,
         grid=grid,
     )
 
@@ -1344,6 +1343,7 @@ def _run_decum_loop(
     stock_pct_end: float = -1.0,
     glide_years: int = 0,
     effective_stock_tax_rate: float = 0.0,
+    return_final_portfolios: bool = False,
 ) -> DecumulationResult:
     """Core decumulation year-loop. All simulation work is vectorised.
 
@@ -1450,6 +1450,9 @@ def _run_decum_loop(
     failed = ruin_years > 0
     ruin_year_median = int(np.median(ruin_years[failed])) if np.any(failed) else None
 
+    final_portfolios = (
+        (stock_v + bond_v).tolist() if return_final_portfolios else None
+    )
     return DecumulationResult(
         n_simulations=n_sims,
         n_years=n_years,
@@ -1462,6 +1465,7 @@ def _run_decum_loop(
         portfolio_percentiles_by_year=portfolio_pcts_by_year,
         withdrawal_percentiles_by_year=withdrawal_pcts_by_year,
         ruin_year_median=ruin_year_median,
+        final_portfolios=final_portfolios,
     )
 
 
@@ -1480,6 +1484,7 @@ def simulate_decumulation(
     glide_years: int | None = None,
     monthly_withdrawal_override: float | None = None,
     effective_stock_tax_rate: float | None = None,
+    return_final_portfolios: bool = False,
 ) -> DecumulationResult:
     sa  = stock_allocation if stock_allocation is not None else config.mc_decumulation_stock_pct
     ny  = n_years          if n_years          is not None else config.mc_decumulation_years
@@ -1490,11 +1495,11 @@ def simulate_decumulation(
     gep = glide_end_pct    if glide_end_pct    is not None else config.mc_decumulation_glide_end_pct
     gyr = glide_years      if glide_years      is not None else config.mc_decumulation_glide_years
     # Capital-gains tax on stock withdrawals. Default = gain-fraction proxy 0.65
-    # (typical for a long-held stock portfolio) × teilfreistellung × tax_rate.
+    # (typical for a long-held stock portfolio) × decum_teilfreistellung × tax_rate.
     # The sizing functions use the same convention; this matches them in the loop.
     est = (
         effective_stock_tax_rate if effective_stock_tax_rate is not None
-        else 0.65 * config.teilfreistellung * config.tax_rate
+        else 0.65 * config.decum_teilfreistellung * config.tax_rate
     )
 
     rng = np.random.default_rng(seed)
@@ -1533,6 +1538,7 @@ def simulate_decumulation(
         stock_pct_end=gep,
         glide_years=gyr,
         effective_stock_tax_rate=est,
+        return_final_portfolios=return_final_portfolios,
     )
 
 
@@ -1625,7 +1631,8 @@ def compute_sorr_scenarios(
         pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
         stock_pct_end=config.mc_decumulation_glide_end_pct,
         glide_years=config.mc_decumulation_glide_years,
-        effective_stock_tax_rate=0.65 * config.teilfreistellung * config.tax_rate,
+        effective_stock_tax_rate=0.65 * config.decum_teilfreistellung * config.tax_rate,
+        return_final_portfolios=True,
     )
 
     baseline = _run_decum_loop(annual_stock_returns=stock_returns, **_common)
@@ -1639,38 +1646,6 @@ def compute_sorr_scenarios(
         stress_scenarios.append((label, _run_decum_loop(annual_stock_returns=patched, **_common)))
 
     return SORRResult(baseline=baseline, stress_scenarios=stress_scenarios)
-
-
-def compute_joint_probability(
-    config: Config,
-    accumulation_p50: float,
-    accumulation_tail: float,
-    tail_pct: int,
-    stock_allocation: float | None = None,
-    stock_std: float | None = None,
-    inflation_std: float | None = None,
-    seed: int = 42,
-    n_simulations: int | None = None,
-    monthly_withdrawal_override: float | None = None,
-) -> JointProbabilityResult:
-    """Chain accumulation percentile portfolios into decumulation survival rates."""
-    _kw = dict(
-        config=config, stock_allocation=stock_allocation,
-        stock_std=stock_std, inflation_std=inflation_std,
-        seed=seed, n_simulations=n_simulations,
-        monthly_withdrawal_override=monthly_withdrawal_override,
-    )
-    dec_p50  = simulate_decumulation(initial_portfolio=accumulation_p50,  **_kw)
-    dec_tail = simulate_decumulation(initial_portfolio=accumulation_tail, **_kw)
-    return JointProbabilityResult(
-        accumulation_p50=accumulation_p50,
-        accumulation_tail=accumulation_tail,
-        tail_pct=tail_pct,
-        p_survive_from_p50=dec_p50.survival_rate,
-        p_survive_from_tail=dec_tail.survival_rate,
-        joint_p50=0.50 * dec_p50.survival_rate,
-        joint_tail=(tail_pct / 100.0) * dec_tail.survival_rate,
-    )
 
 
 def _survival_at_year(result: "DecumulationResult", year: int) -> float:
@@ -1703,7 +1678,7 @@ def compute_allocation_sweep(
 
     # Effective tax on stock withdrawals. Conservative default: 65% gain fraction.
     if effective_stock_tax_rate is None:
-        effective_stock_tax_rate = 0.65 * config.teilfreistellung * config.tax_rate
+        effective_stock_tax_rate = 0.65 * config.decum_teilfreistellung * config.tax_rate
 
     ny  = config.mc_decumulation_years
     n   = n_simulations if n_simulations is not None else min(
@@ -1784,20 +1759,20 @@ def compute_allocation_sweep(
             stock_pct_start=stock_pct_start,
             required_portfolio=required_portfolio,
             net_income_rate=net_rate,
-            survival_yr20_fixed=_survival_at_year(r_fixed, 20),
-            survival_yr30_fixed=_survival_at_year(r_fixed, 30),
-            survival_yr30_gk=_survival_at_year(r_gk, 30),
-            survival_yr35_gk=_survival_at_year(r_gk, 35),
-            survival_yr40_gk=_survival_at_year(r_gk, 40),
+            survival_by_year_fixed=list(r_fixed.survival_by_year),
+            survival_by_year_gk=list(r_gk.survival_by_year),
         ))
 
-    optimal = max(points, key=lambda p: p.survival_yr30_gk)
+    # Pick the allocation with highest GK survival at the horizon (was: at yr-30)
+    optimal = max(points, key=lambda p: p.survival_by_year_gk[-1] if p.survival_by_year_gk else 0.0)
     return AllocationSweepResult(
         points=points,
         optimal_bonds_pct=optimal.bonds_pct,
         glide_end_pct=glide_end,
         glide_years=glide_yrs,
         base_bonds_pct=config.bonds_percentage / 100.0,
+        horizon_years=ny,
+        pension_start_year=config.mc_decumulation_pension_start_year,
     )
 
 
@@ -1808,6 +1783,8 @@ def compute_chained_mc(
     required_portfolio: float,
     n_paths: int | None = None,
     seed: int = 42,
+    secondary_required_portfolio: float | None = None,
+    secondary_required_label: str | None = None,
 ) -> ChainedMCResult:
     """Two-phase chained Monte Carlo: accumulation → decumulation.
 
@@ -1937,6 +1914,12 @@ def compute_chained_mc(
     cond_surv_ok = float(np.mean(alive[accum_ok])) if accum_ok.any() else float("nan")
     cond_surv_fail = float(np.mean(alive[~accum_ok])) if (~accum_ok).any() else float("nan")
 
+    secondary_success_frac: float | None = None
+    if secondary_required_portfolio is not None:
+        secondary_success_frac = float(
+            np.mean(final_portfolios >= secondary_required_portfolio)
+        )
+
     return ChainedMCResult(
         n_chained_paths=n,
         required_portfolio=required_portfolio,
@@ -1948,6 +1931,9 @@ def compute_chained_mc(
         starting_portfolio_percentiles={
             p: float(np.percentile(final_portfolios, p)) for p in (5, 25, 50, 75, 95)
         },
+        secondary_required_portfolio=secondary_required_portfolio,
+        secondary_required_label=secondary_required_label,
+        secondary_accum_success_frac=secondary_success_frac,
     )
 
 
@@ -2005,18 +1991,371 @@ def compute_swr_sweep(
             pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
             stock_pct_end=config.mc_decumulation_glide_end_pct,
             glide_years=config.mc_decumulation_glide_years,
-            effective_stock_tax_rate=0.65 * config.teilfreistellung * config.tax_rate,
+            effective_stock_tax_rate=0.65 * config.decum_teilfreistellung * config.tax_rate,
         )
         points.append(SWRSweepPoint(
             swr=swr,
             monthly_withdrawal=monthly_wd,
-            survival_yr20=_survival_at_year(res, 20),
-            survival_yr30=_survival_at_year(res, 30),
-            survival_yr40=_survival_at_year(res, 40),
+            survival_by_year=list(res.survival_by_year),
         ))
 
     return SWRSweepResult(
         points=points,
         config_swr=config.withdrawal_percentage_stock / 100,
         display_portfolio=display_portfolio,
+        horizon_years=ny,
+        pension_start_year=config.mc_decumulation_pension_start_year,
+    )
+
+
+def compute_wealth_preservation_under_sorr(
+    config: Config,
+    initial_wealth: float,
+    target_monthly_nom: float,
+    *,
+    end_wealth_ratios: list[float] | None = None,
+    bonds_pct_grid: list[float] | None = None,
+    seed: int = 42,
+    n_simulations: int = 10_000,
+) -> WealthPreservationUnderSORR:
+    """SORR × end-wealth preservation matrix at fixed starting wealth.
+
+    For each scenario in {baseline, *_SORR_SEQUENCES} and each end-wealth target
+    ratio r ∈ end_wealth_ratios, finds the bonds allocation that maximises
+    P(final wealth at horizon ≥ r × initial_wealth) under that scenario's forced
+    early-year returns.
+
+    Random draws (inflation, bond yields, post-stress stock returns) are shared
+    across allocations and across scenarios so cells differ only by the lever
+    being varied (allocation × stress sequence). Tie-break within 0.5 pp of best:
+    prefer allocation closest to config.bonds_percentage.
+    """
+    if end_wealth_ratios is None:
+        end_wealth_ratios = [0.50, 0.60, 0.70, 0.80, 0.90, 1.00, 1.10]
+    if bonds_pct_grid is None:
+        bonds_pct_grid = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+
+    current_bonds = config.bonds_percentage / 100.0
+    if not any(abs(b - current_bonds) < 1e-6 for b in bonds_pct_grid):
+        bonds_pct_grid = sorted(bonds_pct_grid + [current_bonds])
+
+    n = n_simulations
+    ny = config.mc_decumulation_years
+    ss = config.mc_stock_return_std_percent / 100
+    is_ = config.mc_inflation_std_percent / 100
+    rng = np.random.default_rng(seed)
+    stock_returns, inflations, bond_yields = _generate_mc_returns(
+        rng, n, ny,
+        config.planning_cagr, ss,
+        config.expected_inflation_percent / 100, is_,
+        config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
+        inflation_ar1_phi=config.mc_inflation_ar1_phi,
+        stock_return_df=config.mc_stock_return_df,
+        stock_bond_corr=config.mc_stock_bond_correlation,
+        stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
+        stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
+        stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+    )
+
+    loop_common = dict(
+        annual_inflations=inflations,
+        annual_bond_yields=bond_yields,
+        initial_monthly_wd=target_monthly_nom,
+        n_years=ny,
+        withdrawal_strategy="fixed",
+        bond_tax_rate=config.tax_rate_bond_italy,
+        pension_monthly=config.mc_decumulation_pension_monthly,
+        pension_start_year=config.mc_decumulation_pension_start_year,
+        pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
+        stock_pct_end=config.mc_decumulation_glide_end_pct,
+        glide_years=config.mc_decumulation_glide_years,
+        effective_stock_tax_rate=0.65 * config.decum_teilfreistellung * config.tax_rate,
+        return_final_portfolios=True,
+    )
+
+    scenarios: list[tuple[str, list[float]]] = [("Baseline (random)", [])]
+    scenarios.extend(_SORR_SEQUENCES)
+
+    bridge_year = config.mc_decumulation_pension_start_year
+    bridge_p3 = bridge_p50 = bridge_p97 = bridge_survival = 0.0
+    tie_band = 0.005
+    rows: list[WealthPreservationRow] = []
+
+    for scenario_label, seq in scenarios:
+        patched = stock_returns.copy()
+        for t, r in enumerate(seq):
+            if t < ny:
+                patched[:, t] = r
+
+        # MC per allocation, share the patched return path
+        final_by_alloc: dict[float, np.ndarray] = {}
+        for bonds_pct in bonds_pct_grid:
+            sa = 1.0 - bonds_pct
+            res = _run_decum_loop(
+                annual_stock_returns=patched,
+                initial_stock_v=np.full(n, initial_wealth * sa),
+                initial_bond_v=np.full(n, initial_wealth * (1.0 - sa)),
+                **loop_common,
+            )
+            final_by_alloc[bonds_pct] = np.asarray(res.final_portfolios)
+            # Capture bridge milestone: baseline scenario + current allocation
+            if (not seq
+                    and abs(bonds_pct - current_bonds) < 1e-6
+                    and bridge_year <= res.n_years):
+                pcts = res.portfolio_percentiles_by_year[bridge_year - 1]
+                bridge_p3 = pcts[3]
+                bridge_p50 = pcts[50]
+                bridge_p97 = pcts[97]
+                bridge_survival = res.survival_by_year[bridge_year - 1]
+
+        # For each ratio: find best P and the allocation that achieves it
+        best_p_by_ratio: list[float] = []
+        best_alloc_by_ratio: list[float] = []
+        p_at_current_by_ratio: list[float] = []
+        for ratio in end_wealth_ratios:
+            target_wealth = ratio * initial_wealth
+            best_p = -1.0
+            best_alloc = bonds_pct_grid[0]
+            p_at_current: float | None = None
+            for bonds_pct in bonds_pct_grid:
+                p = float(np.mean(final_by_alloc[bonds_pct] >= target_wealth))
+                if abs(bonds_pct - current_bonds) < 1e-6:
+                    p_at_current = p
+                if p > best_p + tie_band:
+                    best_p = p
+                    best_alloc = bonds_pct
+                elif abs(p - best_p) <= tie_band and (
+                    abs(bonds_pct - current_bonds) < abs(best_alloc - current_bonds)
+                ):
+                    best_alloc = bonds_pct
+            best_p_by_ratio.append(max(best_p, 0.0))
+            best_alloc_by_ratio.append(best_alloc)
+            p_at_current_by_ratio.append(
+                p_at_current if p_at_current is not None else max(best_p, 0.0)
+            )
+
+        rows.append(WealthPreservationRow(
+            scenario_label=scenario_label,
+            best_p_by_ratio=best_p_by_ratio,
+            best_alloc_by_ratio=best_alloc_by_ratio,
+            p_at_current_by_ratio=p_at_current_by_ratio,
+        ))
+
+    return WealthPreservationUnderSORR(
+        horizon_years=ny,
+        initial_wealth=initial_wealth,
+        target_success_pct=config.mc_target_success_percent,
+        current_bonds_pct=current_bonds,
+        bonds_pct_grid=bonds_pct_grid,
+        end_wealth_ratios=end_wealth_ratios,
+        rows=rows,
+        bridge_year=bridge_year,
+        bridge_p3=bridge_p3,
+        bridge_p50=bridge_p50,
+        bridge_p97=bridge_p97,
+        bridge_survival=bridge_survival,
+    )
+
+
+def compute_canonical_fi_required_scan(
+    config: Config,
+    target_monthly_nom: float,
+    *,
+    preserve_ratios: list[float] | None = None,
+    bonds_pct_grid: list[float] | None = None,
+    lo: float = 100_000.0,
+    hi: float = 10_000_000.0,
+    tolerance: float = 5_000.0,
+    seed: int = 42,
+    n_simulations: int = 5_000,
+) -> CanonicalFIRequiredScan:
+    """Compute the canonical 'FI required portfolio' for each preservation ratio.
+
+    For each X ∈ preserve_ratios, binary-searches the smallest starting wealth W
+    such that, at some bonds allocation in bonds_pct_grid:
+        P(final ≥ X · W | baseline returns) ≥ config.fi_preservation_confidence_baseline
+        P(final ≥ X · W | worst SORR scenario) ≥ config.fi_preservation_confidence_stress
+
+    Returns the scan plus the canonical row (X = config.fi_preservation_ratio).
+    The 'worst' SORR scenario is selected dynamically as the one with lowest
+    baseline preservation at the search ceiling; this stabilises the choice and
+    documents which historical sequence binds the FI bar for this config.
+    """
+    if preserve_ratios is None:
+        preserve_ratios = [0.50, 0.60, 0.70, 0.80, 0.90, 1.00]
+    if bonds_pct_grid is None:
+        bonds_pct_grid = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+
+    current_bonds = config.bonds_percentage / 100.0
+    if not any(abs(b - current_bonds) < 1e-6 for b in bonds_pct_grid):
+        bonds_pct_grid = sorted(bonds_pct_grid + [current_bonds])
+
+    n = n_simulations
+    ny = config.mc_decumulation_years
+    Y = config.fi_preservation_confidence_baseline
+    Z = config.fi_preservation_confidence_stress
+
+    ss = config.mc_stock_return_std_percent / 100
+    is_ = config.mc_inflation_std_percent / 100
+    rng = np.random.default_rng(seed)
+    stock_returns, inflations, bond_yields = _generate_mc_returns(
+        rng, n, ny,
+        config.planning_cagr, ss,
+        config.expected_inflation_percent / 100, is_,
+        config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
+        inflation_ar1_phi=config.mc_inflation_ar1_phi,
+        stock_return_df=config.mc_stock_return_df,
+        stock_bond_corr=config.mc_stock_bond_correlation,
+        stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
+        stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
+        stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+    )
+
+    loop_common = dict(
+        annual_inflations=inflations,
+        annual_bond_yields=bond_yields,
+        initial_monthly_wd=target_monthly_nom,
+        n_years=ny,
+        withdrawal_strategy="fixed",
+        bond_tax_rate=config.tax_rate_bond_italy,
+        pension_monthly=config.mc_decumulation_pension_monthly,
+        pension_start_year=config.mc_decumulation_pension_start_year,
+        pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
+        stock_pct_end=config.mc_decumulation_glide_end_pct,
+        glide_years=config.mc_decumulation_glide_years,
+        effective_stock_tax_rate=0.65 * config.decum_teilfreistellung * config.tax_rate,
+        return_final_portfolios=True,
+    )
+
+    def _final_portfolios(wealth: float, bonds_pct: float, patched_stocks: np.ndarray) -> np.ndarray:
+        sa = 1.0 - bonds_pct
+        res = _run_decum_loop(
+            annual_stock_returns=patched_stocks,
+            initial_stock_v=np.full(n, wealth * sa),
+            initial_bond_v=np.full(n, wealth * (1.0 - sa)),
+            **loop_common,
+        )
+        return np.asarray(res.final_portfolios)
+
+    # ── Pick the worst-SORR scenario at the search ceiling ───────────────────
+    # Run a single MC at hi × current allocation under each SORR; whichever gives
+    # the lowest P(final ≥ 50% of hi) is the binding stress for the canonical.
+    sa_cur = 1.0 - current_bonds
+    worst_label = _SORR_SEQUENCES[0][0]
+    worst_p = 1.0
+    worst_seq: list[float] = list(_SORR_SEQUENCES[0][1])
+    probe_target = 0.50 * hi
+    for label, seq in _SORR_SEQUENCES:
+        patched = stock_returns.copy()
+        for t, r in enumerate(seq):
+            if t < ny:
+                patched[:, t] = r
+        finals = _final_portfolios(hi, current_bonds, patched)
+        p = float(np.mean(finals >= probe_target))
+        if p < worst_p:
+            worst_p = p
+            worst_label = label
+            worst_seq = list(seq)
+
+    # Pre-build the patched stock return paths for baseline + worst SORR
+    baseline_stocks = stock_returns
+    worst_stocks = stock_returns.copy()
+    for t, r in enumerate(worst_seq):
+        if t < ny:
+            worst_stocks[:, t] = r
+
+    # ── Binary search per preservation ratio ─────────────────────────────────
+    def _feasible(W: float, X: float) -> tuple[bool, float, float, float]:
+        """At wealth W with preserve_ratio X, find the best allocation that
+        satisfies both confidences. Returns (feasible, optimal_bonds_pct,
+        baseline_p, stress_p)."""
+        target_wealth = X * W
+        best_meets = False
+        best_alloc = bonds_pct_grid[0]
+        best_baseline_p = 0.0
+        best_stress_p = 0.0
+        best_slack = -float("inf")  # slack = min(baseline_p - Y, stress_p - Z)
+        for bonds_pct in bonds_pct_grid:
+            base_p = float(np.mean(_final_portfolios(W, bonds_pct, baseline_stocks) >= target_wealth))
+            strs_p = float(np.mean(_final_portfolios(W, bonds_pct, worst_stocks) >= target_wealth))
+            meets = (base_p >= Y) and (strs_p >= Z)
+            # Slack: how much margin we have on the binding constraint
+            slack = min(base_p - Y, strs_p - Z)
+            if meets and not best_meets:
+                best_meets = True
+                best_alloc = bonds_pct
+                best_baseline_p = base_p
+                best_stress_p = strs_p
+                best_slack = slack
+            elif meets and best_meets and slack > best_slack:
+                best_alloc = bonds_pct
+                best_baseline_p = base_p
+                best_stress_p = strs_p
+                best_slack = slack
+            elif not best_meets and slack > best_slack:
+                # Track best-so-far even when infeasible (for reporting at hi)
+                best_alloc = bonds_pct
+                best_baseline_p = base_p
+                best_stress_p = strs_p
+                best_slack = slack
+        return best_meets, best_alloc, best_baseline_p, best_stress_p
+
+    rows: list[CanonicalFIRequiredRow] = []
+    for X in preserve_ratios:
+        # Quick reachability check at hi
+        feasible_hi, alloc_hi, base_hi, strs_hi = _feasible(hi, X)
+        if not feasible_hi:
+            rows.append(CanonicalFIRequiredRow(
+                preserve_ratio=X,
+                required_wealth_eur=hi,
+                optimal_bonds_pct=alloc_hi,
+                achieved_baseline_p=base_hi,
+                achieved_stress_p=strs_hi,
+                reachable=False,
+            ))
+            continue
+        lo_x = lo
+        hi_x = hi
+        last_alloc = alloc_hi
+        last_base = base_hi
+        last_strs = strs_hi
+        for _ in range(40):
+            if hi_x - lo_x < tolerance:
+                break
+            mid = 0.5 * (lo_x + hi_x)
+            ok, alloc, base_p, strs_p = _feasible(mid, X)
+            if ok:
+                hi_x = mid
+                last_alloc = alloc
+                last_base = base_p
+                last_strs = strs_p
+            else:
+                lo_x = mid
+        rows.append(CanonicalFIRequiredRow(
+            preserve_ratio=X,
+            required_wealth_eur=hi_x,
+            optimal_bonds_pct=last_alloc,
+            achieved_baseline_p=last_base,
+            achieved_stress_p=last_strs,
+            reachable=True,
+        ))
+
+    # ── Pick the canonical row ───────────────────────────────────────────────
+    canonical_ratio = config.fi_preservation_ratio
+    canonical_row = min(
+        rows, key=lambda r: abs(r.preserve_ratio - canonical_ratio)
+    )
+
+    return CanonicalFIRequiredScan(
+        horizon_years=ny,
+        target_monthly_withdrawal=target_monthly_nom,
+        confidence_baseline=Y,
+        confidence_stress=Z,
+        worst_stress_label=worst_label,
+        bonds_pct_grid=bonds_pct_grid,
+        rows=rows,
+        canonical_ratio=canonical_row.preserve_ratio,
+        canonical_required_wealth=canonical_row.required_wealth_eur,
+        canonical_optimal_bonds_pct=canonical_row.optimal_bonds_pct,
+        canonical_reachable=canonical_row.reachable,
     )

@@ -4,7 +4,6 @@ import pytest
 from models import Config
 from monte_carlo import (
     compute_allocation_sweep,
-    compute_joint_probability,
     compute_sorr_scenarios,
     find_required_decumulation_portfolio,
     simulate_decumulation,
@@ -184,8 +183,9 @@ class TestAllocationSweep:
         sweep = compute_allocation_sweep(config, bonds_pct_values=[0.40, 0.60],
                                          seed=42, n_simulations=200)
         for pt in sweep.points:
-            assert 0.0 <= pt.survival_yr30_gk <= 1.0
-            assert 0.0 <= pt.survival_yr30_fixed <= 1.0
+            assert pt.survival_by_year_gk and pt.survival_by_year_fixed
+            assert all(0.0 <= s <= 1.0 for s in pt.survival_by_year_gk)
+            assert all(0.0 <= s <= 1.0 for s in pt.survival_by_year_fixed)
 
     def test_sweep_required_portfolio_decreases_with_bonds(self):
         # More bonds → higher income rate (IT: bond tax 12.5% < stock tax 26%)
@@ -207,28 +207,6 @@ class TestAllocationSweep:
         sweep = compute_allocation_sweep(config, bonds_pct_values=[0.40, 0.60, 0.80],
                                          seed=42, n_simulations=200)
         assert sweep.base_bonds_pct == pytest.approx(0.60)
-
-
-class TestJointProbability:
-    def test_joint_probability_bounds(self):
-        config = _make_config()
-        joint = compute_joint_probability(
-            config, accumulation_p50=2_000_000.0,
-            accumulation_tail=1_000_000.0, tail_pct=3,
-            seed=42, n_simulations=_SMALL_N,
-        )
-        assert 0.0 <= joint.joint_p50 <= joint.p_survive_from_p50
-        assert 0.0 <= joint.joint_tail <= joint.p_survive_from_tail
-
-    def test_joint_p50_formula(self):
-        config = _make_config()
-        joint = compute_joint_probability(
-            config, accumulation_p50=2_000_000.0,
-            accumulation_tail=1_000_000.0, tail_pct=3,
-            seed=42, n_simulations=_SMALL_N,
-        )
-        assert joint.joint_p50 == pytest.approx(0.50 * joint.p_survive_from_p50)
-        assert joint.joint_tail == pytest.approx(0.03 * joint.p_survive_from_tail)
 
 
 class TestPensionAdjustmentRate:

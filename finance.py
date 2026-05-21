@@ -222,7 +222,18 @@ def run_scenario(
     stock_gain_fraction: float,
     stock_teilfreistellung: float = 1.0,
     annual_contribution_growth: float = 0.0,
+    required_total_portfolio_override: float | None = None,
 ) -> ScenarioResult:
+    """Build a ScenarioResult sized to a required-portfolio target.
+
+    By default the target is derived from the income formula (target_annual_net_income
+    ÷ portfolio_net_income_rate). If `required_total_portfolio_override` is supplied,
+    that value replaces the income-formula target and all dependent fields
+    (required_stock/bonds_amount, monthly contributions, generated income) are
+    recomputed against it. The override is used to inject the canonical FI bar
+    (computed by the decumulation pipeline) so Plan-B math targets preservation,
+    not just income coverage.
+    """
     bonds_weight = config.bonds_percentage / 100
     stocks_weight = 1 - bonds_weight
     effective_stock_tax_rate = stock_gain_fraction * stock_teilfreistellung * stock_tax_rate
@@ -239,10 +250,13 @@ def run_scenario(
     if portfolio_net_income_rate <= 0:
         raise ValueError("Portfolio net income rate must be greater than 0.")
 
-    required_total_portfolio = calculate_required_total_portfolio(
-        target_annual_net_income=target_annual_net_income,
-        net_income_rate=portfolio_net_income_rate,
-    )
+    if required_total_portfolio_override is not None:
+        required_total_portfolio = float(required_total_portfolio_override)
+    else:
+        required_total_portfolio = calculate_required_total_portfolio(
+            target_annual_net_income=target_annual_net_income,
+            net_income_rate=portfolio_net_income_rate,
+        )
     required_bonds_amount = required_total_portfolio * bonds_weight
     required_stock_amount = required_total_portfolio * stocks_weight
     required_monthly_contribution = calculate_required_monthly_contribution(

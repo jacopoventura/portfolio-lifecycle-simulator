@@ -127,6 +127,13 @@ def print_what_you_need_at_horizon(
     future_monthly_income: float,
     target_annual_net_income: float
 ) -> None:
+    """Render §1 'Required portfolio at horizon' table.
+
+    Required portfolios here use the *at-retirement* stock gain fraction (computed once
+    at the projection horizon, ~0.40 for a 15y accumulation). The decumulation MC uses
+    a *horizon-averaged* 0.65 gain-fraction proxy in its tax expression and reports
+    MC-minimum required wealth (always ≥ this deterministic number by the SORR premium).
+    """
     _q_section(
         f"WHAT YOU NEED AT HORIZON  ({config.years:.0f}y, {config.mc_target_success_percent}% MC confidence)",
     )

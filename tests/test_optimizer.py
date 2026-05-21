@@ -72,7 +72,7 @@ class TestOptimizerReturnsResult:
     def test_all_strategies_present(self, opt_result):
         assert set(opt_result.strategies.keys()) == {
             "max_sortino", "max_sharpe", "min_variance", "max_cagr",
-            "max_p50_cagr", "max_p1_cagr", "equal_weight",
+            "max_p50_cagr", "max_p5_cagr", "max_p1_cagr", "equal_weight",
         }
 
     def test_recommended_is_valid_key(self, opt_result):

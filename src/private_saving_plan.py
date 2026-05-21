@@ -19,6 +19,10 @@ def calculate_yearly_vorabpauschale(
     if basiszins <= 0:
         return 0.0
     vorabpauschale_sum = 0.0
+    # The 0.7 factor is the German Vorabpauschalfaktor fixed by §18 InvStG (Basisertrag
+    # = Marktwert × Basiszins × 70%). It is a legal constant, NOT config.teilfreistellung,
+    # despite being numerically the same value as the equity-ETF Teilfreistellung rate.
+    # Teilfreistellung is applied separately at the call site (finance.py:352).
     for tranche in tranches:
         months_held = calculate_months_held_in_year(tranche['purchase_month'], current_month)
         if months_held > 0:

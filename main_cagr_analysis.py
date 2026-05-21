@@ -663,12 +663,14 @@ class PortfolioStrategy:
     portfolio_sharpe: float | None
     portfolio_mdd: float | None
     portfolio_avg_corr: float | None  # weighted avg pairwise correlation across ETF pairs
+    rolling_window_years: int | None = None  # N used for P50/P5/P1 (10 normally; smaller when the subset's history is short; None if no window worked)
 
 
 @dataclass
 class OptimalPortfolioResult:
     eligible_tickers: list[str]
     ticker_names: dict[str, str]             # ticker → full ETF name
+    ticker_data_ranges: dict[str, tuple[date, date]]  # ticker → (data_from, data_to) per ETF
     excluded: list[tuple[str, str]]          # (ticker, reason)
     common_from: date
     common_to: date
@@ -683,16 +685,40 @@ def _portfolio_stats(
     port_ret: np.ndarray,
     dates: pd.DatetimeIndex,
     trading_days_per_year: float,
-) -> tuple[float, float | None, float | None, float | None, float | None, float, float | None, float | None, float | None]:
-    """Return (cagr, p50_10y, p5_10y, p1_10y, annual_ret_std, vol_5y, sortino, sharpe, mdd)."""
+    rolling_window_years: int | None = None,
+) -> tuple[float, float | None, float | None, float | None, float | None, float, float | None, float | None, float | None, int | None]:
+    """Return (cagr, p50, p5, p1, annual_ret_std, vol_5y, sortino, sharpe, mdd, used_window_years).
+
+    Rolling percentiles use a single window (the caller's `rolling_window_years`)
+    so P50, P5 and P1 all come from the same rolling-CAGR distribution — they
+    can be compared without window-mismatch caveats. When the caller doesn't
+    specify a window, defaults to 10y and falls back to smaller N (9,8,…,3)
+    until a viable rolling distribution exists.
+    `used_window_years` records the N actually used (or None if no window worked).
+    """
     n = len(port_ret)
     total_ret = float((1.0 + port_ret).prod())
     cagr = total_ret ** (trading_days_per_year / n) - 1.0 if n > 0 else 0.0
 
-    # Rolling 10y percentiles (entry-point timing distribution)
     cum_prices = pd.Series((1.0 + port_ret).cumprod() * 100.0, index=dates)
-    rolling = _rolling_cagrs(cum_prices, years=10)
-    if rolling is not None and len(rolling) >= 5:
+    rolling = None
+    used_window_years: int | None = None
+    if rolling_window_years is not None:
+        # Caller pre-chose the window (typically the largest viable for this subset).
+        candidate = _rolling_cagrs(cum_prices, years=rolling_window_years)
+        if candidate is not None and len(candidate) >= 5:
+            rolling = candidate
+            used_window_years = rolling_window_years
+    else:
+        # No explicit choice: try 10y first, fall back to largest smaller N that fits.
+        for n_years in (10, 9, 8, 7, 6, 5, 4, 3):
+            candidate = _rolling_cagrs(cum_prices, years=n_years)
+            if candidate is not None and len(candidate) >= 5:
+                rolling = candidate
+                used_window_years = n_years
+                break
+
+    if rolling is not None:
         p50_10y = float(np.percentile(rolling, 50))
         p5_10y  = float(np.percentile(rolling, 5))
         p1_10y  = float(np.percentile(rolling, 1))
@@ -719,7 +745,7 @@ def _portfolio_stats(
     peak = np.maximum.accumulate(cum)
     mdd = float(((cum - peak) / peak).min()) if len(cum) > 0 else None
 
-    return cagr, p50_10y, p5_10y, p1_10y, annual_ret_std, vol_5y, sortino, sharpe, mdd
+    return cagr, p50_10y, p5_10y, p1_10y, annual_ret_std, vol_5y, sortino, sharpe, mdd, used_window_years
 
 
 def _run_optimization(
@@ -923,6 +949,33 @@ def compute_optimal_portfolio(
     def _neg_p1_cagr(w: np.ndarray) -> float:
         return -_rolling_pct(w, 1)
 
+    # max_p5_cagr uses the LARGEST rolling window that the subset's combined data
+    # supports — target: max(10, common_span − 1), falling back to the largest
+    # viable N if 10y doesn't fit. So 9.8y subsets → 9y rolling P5, 16y → 15y.
+    _n_returns = len(ret_array)
+    _common_span_years = _n_returns / tdpy
+    _p5_target_years = max(10, int(_common_span_years - 1))
+    _p5_chosen_window_years: int | None = None
+    for _candidate_N in range(_p5_target_years, 2, -1):
+        _wN = max(1, int(round(_candidate_N * tdpy)))
+        if _n_returns - _wN >= 5:
+            _p5_chosen_window_years = _candidate_N
+            break
+    if _p5_chosen_window_years is not None:
+        _wN_p5 = max(1, int(round(_p5_chosen_window_years * tdpy)))
+
+        def _neg_p5_cagr(w: np.ndarray) -> float:
+            """Negate the 5th-percentile rolling-N CAGR (N = chosen window for this subset)."""
+            pr = ret_array @ w
+            cum_ext = np.concatenate([[1.0], np.cumprod(1.0 + pr)])
+            if len(cum_ext) <= _wN_p5:
+                return -float((1.0 + pr).prod()) ** (tdpy / len(pr)) + 1.0
+            ratios = cum_ext[_wN_p5:] / cum_ext[:-_wN_p5]
+            cagrs = ratios ** (tdpy / _wN_p5) - 1.0
+            return -float(np.percentile(cagrs, 5))
+    else:
+        _neg_p5_cagr = _neg_p50_cagr  # fallback: not enough data even for 3y rolling
+
     # ── Weight cleanup — enforces threshold and all per-ticker caps ──────────
     def _clean_weights(w_raw: np.ndarray) -> np.ndarray:
         w = w_raw.copy()
@@ -1018,7 +1071,9 @@ def compute_optimal_portfolio(
     def _make_strategy(name: str, w_raw: np.ndarray) -> PortfolioStrategy:
         w = _clean_weights(w_raw)
         pr = ret_array @ w
-        cagr, p50, p5, p1, annual_std, vol_5y, sortino, sharpe, mdd = _portfolio_stats(pr, dates, tdpy)
+        (cagr, p50, p5, p1, annual_std, vol_5y, sortino, sharpe, mdd,
+         used_window_years) = _portfolio_stats(pr, dates, tdpy,
+                                              rolling_window_years=_p5_chosen_window_years)
         return PortfolioStrategy(
             name=name,
             weights={t: float(w[i]) for i, t in enumerate(eligible)},
@@ -1031,6 +1086,7 @@ def compute_optimal_portfolio(
             portfolio_sortino=sortino,
             portfolio_sharpe=sharpe,
             portfolio_mdd=mdd,
+            rolling_window_years=used_window_years,
             portfolio_avg_corr=_weighted_avg_corr(w),
         )
 
@@ -1039,6 +1095,7 @@ def compute_optimal_portfolio(
     w_minvar  = _run_optimization(ret_array, n, _variance,    bounds_box, constraints, seed=seed)
     w_cagr    = _run_optimization(ret_array, n, _neg_cagr,    bounds_box, constraints, seed=seed)
     w_p50     = _run_optimization(ret_array, n, _neg_p50_cagr, bounds_box, constraints, seed=seed)
+    w_p5      = _run_optimization(ret_array, n, _neg_p5_cagr,  bounds_box, constraints, seed=seed)
     w_p1      = _run_optimization(ret_array, n, _neg_p1_cagr,  bounds_box, constraints, seed=seed)
     # Fix 4: equal weight also goes through _clean_weights so QQQ cap is enforced
     w_equal   = np.ones(n) / n
@@ -1049,6 +1106,7 @@ def compute_optimal_portfolio(
         "min_variance": _make_strategy("Min Variance", w_minvar),
         "max_cagr":     _make_strategy("Max CAGR",     w_cagr),
         "max_p50_cagr": _make_strategy("Max P50 CAGR", w_p50),
+        "max_p5_cagr":  _make_strategy("Max P5 CAGR",  w_p5),
         "max_p1_cagr":  _make_strategy("Max P1 CAGR",  w_p1),
         "equal_weight": _make_strategy("Equal Weight", w_equal),
     }
@@ -1058,7 +1116,14 @@ def compute_optimal_portfolio(
     # deprioritised — a 40yr decumulation plan must be optimised on P5 survival,
     # not P50 alone (P5=n/a means we can't size the worst-case downside).
     def _rec_score(s: "PortfolioStrategy") -> tuple[int, float]:
-        if s.portfolio_cagr_p5 is not None:
+        # Rank using TRUE 10y rolling P5. Fallback P5 (shorter window) is display
+        # only — using it here would compare 9y/8y P5 to 10y P5 on the same tier,
+        # which biases toward short-window strategies.
+        is_full_10y_p5 = (
+            s.portfolio_cagr_p5 is not None
+            and s.rolling_window_years == 10
+        )
+        if is_full_10y_p5:
             return (1, s.portfolio_cagr_p5)
         if s.portfolio_cagr_p50 is not None:
             return (0, s.portfolio_cagr_p50)
@@ -1070,10 +1135,15 @@ def compute_optimal_portfolio(
         recommended = max(strategies, key=lambda k: _rec_score(strategies[k]))
 
     ticker_names = {t: result_map[t].name for t in eligible if t in result_map}
+    ticker_data_ranges = {
+        t: (result_map[t].data_from, result_map[t].data_to)
+        for t in eligible if t in result_map
+    }
 
     return OptimalPortfolioResult(
         eligible_tickers=eligible,
         ticker_names=ticker_names,
+        ticker_data_ranges=ticker_data_ranges,
         excluded=excluded,
         common_from=dates[0].date(),
         common_to=dates[-1].date(),
@@ -1265,9 +1335,16 @@ def compute_cardinality_sweep(
             if opt is None or strategy_key not in opt.strategies:
                 continue
             strat = opt.strategies[strategy_key]
-            # Tuple score: P5-available subsets always rank above P5=None ones, so
-            # the sweep never recommends a combo whose worst-case can't be measured.
-            if strat.portfolio_cagr_p5 is not None:
+            # Tuple score: subsets with TRUE 10y P5 (not fallback) rank above
+            # those without. The fallback P5 covers display only — using it for
+            # ranking would compare 9y/8y/… P5 to 10y P5 on the same tier,
+            # which biases toward short-window subsets (their rolling distribution
+            # is narrower and likely bull-market-dominated).
+            is_full_10y_p5 = (
+                strat.portfolio_cagr_p5 is not None
+                and strat.rolling_window_years == 10
+            )
+            if is_full_10y_p5:
                 score = (1, strat.portfolio_cagr_p5)
             elif strat.portfolio_cagr_p50 is not None:
                 score = (0, strat.portfolio_cagr_p50)
@@ -1288,6 +1365,7 @@ def print_portfolio_final_summary(
     strategy_key: str,
     sweep: "list[tuple[int, OptimalPortfolioResult]] | None" = None,
     sp500_prices: "pd.Series | None" = None,
+    fx_cache: "dict[str, pd.Series | None] | None" = None,
 ) -> None:
     """Compact table — k | Allocation | P50 | P5 | Sharpe | Sortino | MDD | Avg corr.
     σ is dropped vs the verbose optimiser table; everything else relevant to a
@@ -1295,19 +1373,22 @@ def print_portfolio_final_summary(
     strat_label = {
         "max_sortino": "Max Sortino", "max_sharpe": "Max Sharpe",
         "min_variance": "Min Variance", "max_cagr": "Max CAGR",
-        "max_p50_cagr": "Max P50 CAGR", "max_p1_cagr": "Max P1 CAGR",
-        "equal_weight": "Equal Weight",
+        "max_p50_cagr": "Max P50 CAGR", "max_p5_cagr": "Max P5 CAGR",
+        "max_p1_cagr": "Max P1 CAGR", "equal_weight": "Equal Weight",
     }.get(strategy_key, strategy_key)
 
-    k_w     = 4   # widened from 3 to fit "★all" / "★2" / "☆3" prefixes
-    p50_w   = 6
-    p5_w    = 6
-    ratio_w = 6   # Sharpe / Sortino
-    mdd_w   = 7
-    corr_w  = 6
-    fixed = (2 + k_w + 2 + 2 + p50_w + 2 + p5_w + 2 + ratio_w + 2
-             + ratio_w + 2 + mdd_w + 2 + corr_w)
-    alloc_w = max(40, shutil.get_terminal_size((120, 50)).columns - fixed)
+    # Tightened column widths — fit actual content with minimal padding.
+    # k: "★all" / "★2" / "☆3" / "ref" need 4 chars
+    # P50 / P5: "16.0%" / "n/a" fit in 5
+    # Sharpe / Sortino: "0.86" fits in 5 (one space)
+    # MDD: "-29.7%" fits in 6
+    # Avg corr: "0.34" fits in 5
+    k_w     = 4
+    p50_w   = 5
+    p5_w    = 5
+    ratio_w = 5
+    mdd_w   = 6
+    corr_w  = 5
 
     def _alloc(result: "OptimalPortfolioResult", key: str) -> str:
         strat = result.strategies[key]
@@ -1326,9 +1407,11 @@ def print_portfolio_final_summary(
               f"  {mdd:>{mdd_w}}  {corr:>{corr_w}}")
 
     def _fmt_strat(strat: "PortfolioStrategy", n_years: float) -> tuple[str, str, str, str, str, str]:
-        use_p50 = n_years >= 10
-        cagr   = strat.portfolio_cagr_p50 if use_p50 else strat.portfolio_cagr
-        p50    = f"{cagr * 100:.1f}%" if cagr is not None else "n/a"
+        # Both P50 and P5 come from the SAME rolling-N distribution where N is
+        # max(10, common_span − 1) or the largest viable fallback. The ⚠ flag
+        # marks rows where N < 10y so the reader knows the window is short.
+        p50_val = strat.portfolio_cagr_p50 if strat.portfolio_cagr_p50 is not None else strat.portfolio_cagr
+        p50    = f"{p50_val * 100:.1f}%" if p50_val is not None else "n/a"
         p5     = f"{strat.portfolio_cagr_p5 * 100:.1f}%" if strat.portfolio_cagr_p5 is not None else "n/a"
         sharpe = f"{strat.portfolio_sharpe:.2f}" if strat.portfolio_sharpe is not None else "n/a"
         srt    = f"{strat.portfolio_sortino:.2f}" if strat.portfolio_sortino is not None else "n/a"
@@ -1338,14 +1421,25 @@ def print_portfolio_final_summary(
 
     def _flag_alloc(result: "OptimalPortfolioResult", key: str) -> str:
         strat = result.strategies.get(key)
-        prefix = "⚠ " if (strat is not None and strat.portfolio_cagr_p5 is None) else ""
-        return prefix + _alloc(result, key)
+        if strat is None:
+            return _alloc(result, key)
+        # ⚠ marks rows where P5 used a rolling window < 10y because the common
+        # history was short. None means even 3y rolling didn't produce ≥5 samples.
+        rwy = strat.rolling_window_years
+        if rwy is None or rwy < 10:
+            return "⚠ " + _alloc(result, key)
+        return _alloc(result, key)
 
-    # Tuple score per row: (P5-available flag, P5/P50/CAGR). Same ranking
-    # used by the recommender — a row with measurable P5 always beats a row
-    # with P5=n/a (history < 10y), since a 40yr decum needs a real worst-case.
+    # Tuple score per row: (true-10y-P5-available flag, P5/P50/CAGR). Same
+    # ranking used by the recommender — a row with TRUE 10y P5 always beats
+    # a row whose P5 came from the shorter-window fallback. A 40yr decum needs
+    # a real worst-case measured over a full 10y entry-point distribution.
     def _row_score(strat: "PortfolioStrategy") -> tuple[int, float]:
-        if strat.portfolio_cagr_p5 is not None:
+        is_full_10y_p5 = (
+            strat.portfolio_cagr_p5 is not None
+            and strat.rolling_window_years == 10
+        )
+        if is_full_10y_p5:
             return (1, strat.portfolio_cagr_p5)
         if strat.portfolio_cagr_p50 is not None:
             return (0, strat.portfolio_cagr_p50)
@@ -1373,10 +1467,23 @@ def print_portfolio_final_summary(
             return f"☆{label}"
         return label
 
+    # Size alloc_w to actual content (not terminal width) — keeps the table compact.
+    # Floor 40 covers the S&P 500 ref row label; cap 70 prevents pathological widths.
+    formatted_allocs = [_flag_alloc(result, strategy_key) for _, result, _ in candidates]
+    max_alloc_len = max((len(a) for a in formatted_allocs), default=40)
+    alloc_w = max(40, min(max_alloc_len, 70))
+    fixed = (2 + k_w + 2 + 2 + p50_w + 2 + p5_w + 2 + ratio_w + 2
+             + ratio_w + 2 + mdd_w + 2 + corr_w)
     W = fixed + alloc_w
     print(f"{'OPTIMAL PORTFOLIO — FINAL SUMMARY':^{W}}")
-    print(f"  Strategy : {strat_label}   ·   ★ recommended   ☆ runner-up   ·   ⚠ = P5 n/a (history < 10y)")
+    print(f"  Strategy : {strat_label}   ·   ★ recommended   ☆ runner-up   ·   ⚠ = P5 from < 10y rolling (etf history short)")
     print()
+
+    # Common window — drives the etf-window reference row below.
+    if opt_result.ticker_data_ranges:
+        print(f"  Common window  {opt_result.common_from.strftime('%Y-%m')} → "
+              f"{opt_result.common_to.strftime('%Y-%m')}   {opt_result.n_years:.1f}y")
+        print()
 
     _row("k", "Allocation", "P50", "P5", "Sharpe", "Sortino", "MDD", "Avg corr")
     print("  " + "─" * (W - 2))
@@ -1387,15 +1494,75 @@ def print_portfolio_final_summary(
              p50, p5, sharpe, srt, mdd, corr)
 
     if sp500_prices is not None:
-        ref = _era_stats(sp500_prices, "2000-01-01", None)
-        if ref["cagr"] is not None:
+        # First reference: S&P 500 over the ETF common window (common_from → today).
+        # Use EUR-converted prices if EURUSD data covers the window, else native USD.
+        common_from = pd.Timestamp(opt_result.common_from)
+        eurusd = fx_cache.get("USD") if fx_cache else None
+        eurusd_start = pd.Timestamp(eurusd.index.min()) if eurusd is not None and len(eurusd) else None
+
+        if eurusd_start is not None and common_from >= eurusd_start:
+            ref1_prices = convert_to_eur(sp500_prices, "USD", eurusd)
+            ref1_ccy = "EUR"
+        else:
+            ref1_prices = sp500_prices
+            ref1_ccy = "USD"
+
+        ref1 = _era_stats(ref1_prices, common_from.strftime("%Y-%m-%d"), None)
+        printed_separator = False
+        if ref1["cagr"] is not None:
+            ref1_sliced = ref1_prices[ref1_prices.index >= common_from]
+            # Try rolling 10y first (matches optimised rows). If the window is
+            # too short, fall back to the largest N-year rolling that yields
+            # non-empty samples. Label the row when N ≠ 10.
+            ref1_rolling = None
+            chosen_years = None
+            for n in (10, 9, 8, 7, 6, 5, 4, 3):
+                candidate = _rolling_cagrs(ref1_sliced, years=n)
+                if candidate is not None and len(candidate) > 0:
+                    ref1_rolling = candidate
+                    chosen_years = n
+                    break
+
+            if ref1_rolling is not None:
+                ref1_p5 = f"{float(np.percentile(ref1_rolling, 5)) * 100:.1f}%"
+            else:
+                ref1_p5 = "n/a"
+
+            window_tag = (
+                f", {chosen_years}y roll"
+                if chosen_years is not None and chosen_years != 10
+                else ""
+            )
             print("  " + "─" * (W - 2))
+            printed_separator = True
             _row(
                 "ref",
-                f"S&P 500  2000–today  [{ref['yr_from']}–{ref['yr_to']}]",
-                f"{ref['cagr'] * 100:.1f}%", "—",
+                f"S&P 500  etf-window  [{ref1['yr_from']}–{ref1['yr_to']}] "
+                f"({ref1_ccy}{window_tag})",
+                f"{ref1['cagr'] * 100:.1f}%", ref1_p5,
                 "—", "—",
-                f"{ref['mdd']  * 100:.1f}%", "—",
+                f"{ref1['mdd']  * 100:.1f}%", "—",
+            )
+
+        # Second reference: S&P 500 over the full 2000-today window (always USD).
+        ref2 = _era_stats(sp500_prices, "2000-01-01", None)
+        if ref2["cagr"] is not None:
+            # P5 of rolling 10y CAGR — same metric as portfolio_cagr_p5, so the
+            # comparison is apples-to-apples.
+            sp500_sliced = sp500_prices[sp500_prices.index >= pd.Timestamp("2000-01-01")]
+            rolling_10y = _rolling_cagrs(sp500_sliced, years=10)
+            if rolling_10y is not None and len(rolling_10y) > 0:
+                ref2_p5 = f"{float(np.percentile(rolling_10y, 5)) * 100:.1f}%"
+            else:
+                ref2_p5 = "—"
+            if not printed_separator:
+                print("  " + "─" * (W - 2))
+            _row(
+                "ref",
+                f"S&P 500  2000–today  [{ref2['yr_from']}–{ref2['yr_to']}]",
+                f"{ref2['cagr'] * 100:.1f}%", ref2_p5,
+                "—", "—",
+                f"{ref2['mdd']  * 100:.1f}%", "—",
             )
 
     print()
@@ -1990,6 +2157,7 @@ def print_take_away(
             strategy_key=sweep_strategy,
             sweep=sweep,
             sp500_prices=sp500_prices,
+            fx_cache=fx_cache,
         )
 
 
@@ -2178,7 +2346,8 @@ def main() -> None:
     prices_eur: dict[str, pd.Series] = {}
 
     if run_cagr or run_optimizer:
-        print(f"  Fetching {len(TICKERS)} tickers…", end="" if not verbose else "\n", flush=True)
+        if verbose:
+            print(f"  Fetching {len(TICKERS)} tickers…", flush=True)
         failed: list[str] = []
         for ticker in TICKERS:
             eu = ticker in EU_TICKERS
@@ -2196,10 +2365,8 @@ def main() -> None:
                 failed.append(ticker)
                 if verbose:
                     print(f"  ✗  [{cache_status}]")
-        ok_count = len(results)
-        fail_str = f"  {len(failed)} failed: {', '.join(failed)}" if failed else ""
-        if not verbose:
-            print(f"  {ok_count} ok{fail_str}")
+        if failed:
+            print(f"  [!] {len(failed)} ticker(s) failed: {', '.join(failed)}")
 
         if not results:
             print("\n  No data retrieved.")
@@ -2210,8 +2377,9 @@ def main() -> None:
 
     if run_benchmark or run_forward:
         if benchmark_tickers:
-            print(f"  Fetching {len(benchmark_tickers)} benchmark indices…",
-                  end="" if not verbose else "\n", flush=True)
+            if verbose:
+                print(f"  Fetching {len(benchmark_tickers)} benchmark indices…",
+                      flush=True)
             bfailed: list[str] = []
             for bticker in benchmark_tickers:
                 prices_b, bstatus, bccy = fetch_benchmark_series(bticker)
@@ -2223,10 +2391,8 @@ def main() -> None:
                               f"({len(prices_b):,} days)  [{bccy}]")
                 else:
                     bfailed.append(bticker)
-            if not verbose:
-                ok_b = len(benchmark_prices)
-                fail_b = f"  {len(bfailed)} failed: {', '.join(bfailed)}" if bfailed else ""
-                print(f"  {ok_b} ok{fail_b}")
+            if bfailed:
+                print(f"  [!] {len(bfailed)} benchmark(s) failed: {', '.join(bfailed)}")
 
     # ── CAGR analysis ─────────────────────────────────────────────────────────
     if run_cagr and results:
@@ -2254,7 +2420,6 @@ def main() -> None:
             print()
             print(f"{'PORTFOLIO OPTIMISER':^70}")
             print()
-        print("  Running optimisation (15 restarts per strategy)…", flush=True)
         opt_result = compute_optimal_portfolio(
             results=results,
             prices_eur=prices_eur,
@@ -2275,11 +2440,6 @@ def main() -> None:
             max_k = opt_cfg.get("cardinality_sweep_max_k", None)
             n_eligible = len(opt_result.eligible_tickers)
             k_limit = min(n_eligible, int(max_k)) if max_k is not None else n_eligible
-            from math import comb
-            n_subsets = sum(comb(n_eligible, k) for k in range(2, k_limit + 1))
-            print()
-            print(f"  Running cardinality sweep (k=2..{k_limit}, {n_subsets} subsets)…",
-                  flush=True)
             sweep = compute_cardinality_sweep(
                 results=results,
                 prices_eur=prices_eur,

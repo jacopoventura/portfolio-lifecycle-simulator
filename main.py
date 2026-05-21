@@ -27,7 +27,7 @@ import io
 import sys
 from pathlib import Path
 
-from models import CagrRealismSnapshot, DecumulationSummary, PlanVerdictSummary
+from models import CagrRealismSnapshot, CanonicalFIRequiredScan, DecumulationSummary, PlanVerdictSummary
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -123,19 +123,19 @@ def print_plan_snapshot(
         joint_acc_surv = decum_summary.joint_survival_chained
 
     if decum_summary is not None:
-        req_decum   = _fmt_eur(decum_summary.required_portfolio_income)
+        req_decum   = _fmt_eur(decum_summary.required_portfolio_fi_canonical)
         target_wd   = _fmt_eur(decum_summary.target_monthly_withdrawal)
         surv_fixed  = _fmt_pct(decum_summary.survival_fixed_final)
         surv_gk     = _fmt_pct(decum_summary.survival_gk_final)
-        horizon_yr  = decum_summary.n_years
+        horizon_lbl = str(decum_summary.n_years)
     else:
         req_decum = target_wd = surv_fixed = surv_gk = "—"
-        horizon_yr = 40
+        horizon_lbl = "—"
 
-    print(f"  Decumulation  ({horizon_yr}yr horizon, fixed nominal withdrawal)")
+    print(f"  Decumulation  ({horizon_lbl}yr horizon, fixed nominal withdrawal)")
     print(f"    Required portfolio   : {req_decum}  →  {target_wd}/mo")
-    print(f"    Survival yr{horizon_yr} — fixed: {surv_fixed}")
-    print(f"    Survival yr{horizon_yr} — GK   : {surv_gk}")
+    print(f"    Survival yr{horizon_lbl} — fixed: {surv_fixed}")
+    print(f"    Survival yr{horizon_lbl} — GK   : {surv_gk}")
     print(f"    Joint P(acc ∧ surv)  : {_fmt_pct(joint_acc_surv)}")
     print()
     print()
@@ -245,37 +245,100 @@ def _planning_cagr_argv(planning_cagr: str | None) -> list[str]:
     return ["--cagr", planning_cagr] if planning_cagr else []
 
 
-def run_accum(verbose: bool = False, planning_cagr: str | None = None
-              ) -> tuple[str, float, float, float | None, int]:
-    """Run accumulation section. Returns (report_text, p50, tail, required_cagr, tail_pct)."""
+def prep_canonical_fi(planning_cagr: str | None = None) -> CanonicalFIRequiredScan | None:
+    """Compute the canonical FI bar before either pillar runs.
+
+    Returns the scan so the pipeline can pass `--target-required-portfolio X` to
+    accumulation AND forward the precomputed scan to decumulation (avoiding a
+    second computation). Returns None if config is unavailable.
+    """
+    import tomllib
+    from models import Config
+    from monte_carlo import compute_canonical_fi_required_scan
+
+    try:
+        with open("config.toml", "rb") as f:
+            raw = tomllib.load(f)
+    except Exception as e:
+        print(f"  [!] Skipping canonical FI prep — couldn't load config.toml: {e}")
+        return None
+    config = Config.from_dict(raw)
+    config.planning_cagr_override = Config.parse_planning_cagr(planning_cagr)
+
+    infl_factor = (1.0 + config.expected_inflation_percent / 100.0) ** config.years
+    target_monthly_nom = config.target_monthly_retirement_income * infl_factor
+
+    print()
+    print("─" * 80)
+    print("FI CANONICAL BAR  —  preservation-calibrated required portfolio")
+    print("─" * 80)
+    print(f"  Preserve ≥{int(round(config.fi_preservation_ratio * 100))}% of initial wealth "
+          f"at yr {config.mc_decumulation_years}")
+    print(f"  Baseline P≥{int(round(config.fi_preservation_confidence_baseline * 100))}%, "
+          f"worst-SORR P≥{int(round(config.fi_preservation_confidence_stress * 100))}%")
+    print(f"  Computing scan…", end="", flush=True)
+    scan = compute_canonical_fi_required_scan(config, target_monthly_nom)
+    label = "reachable" if scan.canonical_reachable else "UNREACHABLE in search range"
+    print(f"\r  Result: €{scan.canonical_required_wealth:,.0f}  "
+          f"at {int(round(scan.canonical_optimal_bonds_pct * 100))}% bonds  "
+          f"(worst-SORR: {scan.worst_stress_label})  [{label}]                      ")
+    print("  → accumulation will target this number; decumulation will use it as anchor.")
+    print()
+    return scan
+
+
+def run_accum(verbose: bool = False, planning_cagr: str | None = None,
+              target_required_portfolio: float | None = None
+              ) -> tuple[str, float, float, float | None, int, float]:
+    """Run accumulation section.
+
+    Returns (report_text, p50, tail, required_cagr, tail_pct, accum_required_it).
+    accum_required_it is the IT scenario's income-formula required portfolio
+    (€2.07M at config) — passed to decum's chained MC for the §4.8 secondary threshold.
+    """
     import main_portfolio_projection as m
 
     _banner(1, "ACCUMULATION — target portfolio, contributions, financial freedom")
     argv = ["--no-clear", *_planning_cagr_argv(planning_cagr)]
     if verbose:
         argv.append("--verbose")
+    if target_required_portfolio is not None and target_required_portfolio > 0:
+        argv.extend(["--target-required-portfolio", str(target_required_portfolio)])
     text, result = _capture(m.main, argv)
 
     if result is None:
         print("\n  [!] Accumulation failed — check config.toml")
-        return text, 0.0, 0.0, None, 3
-    p50, tail, required_cagr, tail_pct, _vr, _cs, _cfg = result
-    return text, p50, tail, required_cagr, tail_pct
+        return text, 0.0, 0.0, None, 3, 0.0
+    p50, tail, required_cagr, tail_pct, accum_required_it, _vr, _cs, _cfg = result
+    return text, p50, tail, required_cagr, tail_pct, accum_required_it
 
 
-def run_decum(p50: float, tail: float, tail_pct: int,
+def run_decum(p50: float,
+              accum_required_it: float = 0.0,
+              canonical_scan: CanonicalFIRequiredScan | None = None,
               planning_cagr: str | None = None) -> tuple[str, DecumulationSummary | None]:
-    """Run decumulation section. Returns (report text, typed summary)."""
+    """Run decumulation section. Returns (report text, typed summary).
+
+    p50: accumulation P50 wealth from main_portfolio_projection — used as the
+         starting wealth for survival curves, fan, GK range, SORR, and §4.11.
+    accum_required_it: IT scenario's income-formula required portfolio — used as
+         the §4.8 secondary 'reaching ≥' threshold for cross-comparison with accum's
+         success rate.
+    canonical_scan: precomputed canonical FI scan; if provided, decumulation skips
+         the internal scan and uses this one as the anchor.
+    """
     import main_decumulation as m
 
     print()
-    _banner(2, "DECUMULATION — 40-year withdrawal survival & joint probability")
+    _banner(2, "DECUMULATION — withdrawal survival & wealth preservation under SORR")
     text, summary = _capture(
         lambda: m.main(
-            p50_override=p50 if p50 > 0 else None,
-            tail_override=tail if tail > 0 else None,
+            portfolio_override=p50 if p50 > 0 else None,
+            accum_required_override=accum_required_it if accum_required_it > 0 else None,
+            canonical_fi_scan=canonical_scan,
+            no_clear=True,
+            cagr=planning_cagr,
         ),
-        ["--no-clear", "--tail-pct", str(tail_pct), *_planning_cagr_argv(planning_cagr)],
     )
     return text, summary if isinstance(summary, DecumulationSummary) else None
 
@@ -367,15 +430,27 @@ def main() -> None:
     tail_pct = 3
     config_toml = Path("config.toml").read_text() if Path("config.toml").exists() else ""
 
+    # Preflight: canonical FI bar — both pillars target the same preservation-calibrated number.
+    canonical_scan: CanonicalFIRequiredScan | None = None
+    canonical_required: float = 0.0
+    if start <= _SECTIONS.index("decum"):
+        canonical_scan = prep_canonical_fi(planning_cagr=planning_cagr)
+        if canonical_scan is not None and canonical_scan.canonical_reachable:
+            canonical_required = canonical_scan.canonical_required_wealth
+
     # Section 1: Accumulation
+    accum_required_it = 0.0
     if start <= _SECTIONS.index("accum"):
-        accum_text, p50, tail, required_cagr, tail_pct = run_accum(
+        accum_text, p50, tail, required_cagr, tail_pct, accum_required_it = run_accum(
             verbose=args.verbose, planning_cagr=planning_cagr,
+            target_required_portfolio=canonical_required if canonical_required > 0 else None,
         )
 
     # Section 2: Decumulation
     if start <= _SECTIONS.index("decum"):
-        decum_text, decum_summary = run_decum(p50, tail, tail_pct,
+        decum_text, decum_summary = run_decum(p50,
+                                              accum_required_it=accum_required_it,
+                                              canonical_scan=canonical_scan,
                                               planning_cagr=planning_cagr)
 
     # Section 3: CAGR + optimiser

@@ -40,6 +40,14 @@ class Config:
     mc_decumulation_pension_adjustment_rate: float = 0.0  # nominal annual pension growth (0 = fixed nominal)
     mc_decumulation_glide_end_pct: float = 0.0   # stock% at end of glide (0 = no glide)
     mc_decumulation_glide_years: int = 0          # years to complete glide (0 = no glide)
+    # Canonical FI required portfolio criteria — see config.toml documentation
+    fi_preservation_ratio: float = 0.50
+    fi_preservation_confidence_baseline: float = 0.95
+    fi_preservation_confidence_stress: float = 0.50
+    # Teilfreistellung applied during decumulation. Defaults to 1.0 (no discount: IT
+    # regime, where capital gains on stocks are taxed at full tax_rate). Set to the
+    # German value (e.g. 0.7 for equity ETFs) if decumulating under DE tax rules.
+    decum_teilfreistellung: float = 1.0
     mc_grid_cagr_min: float = 0.03
     mc_grid_cagr_max: float = 0.09
     mc_grid_cagr_step: float = 0.01
@@ -121,6 +129,10 @@ class Config:
                 1.0 - float(config["bonds_percentage"]) / 100.0,  # default = start = no glide
             )),
             mc_decumulation_glide_years=int(config.get("mc_decumulation_glide_years", 0)),
+            fi_preservation_ratio=float(config.get("fi_preservation_ratio", 0.50)),
+            fi_preservation_confidence_baseline=float(config.get("fi_preservation_confidence_baseline", 0.95)),
+            fi_preservation_confidence_stress=float(config.get("fi_preservation_confidence_stress", 0.50)),
+            decum_teilfreistellung=float(config.get("decum_teilfreistellung", 1.0)),
             mc_grid_n_simulations=int(config.get("mc_grid_n_simulations", 15_000)),
             mc_grid_contribution_max=float(config.get("mc_grid_contribution_max", 7_000.0)),
             mc_stock_return_df=float(config.get("mc_stock_return_df", 1000.0)),
@@ -369,6 +381,7 @@ class DecumulationResult:
     portfolio_percentiles_by_year: list[dict[int, float]]   # {3,25,50,75,97} per year
     withdrawal_percentiles_by_year: list[dict[int, float]]  # {10,50,90} per year
     ruin_year_median: int | None       # median year of ruin among failed sims
+    final_portfolios: list[float] | None = None  # per-path wealth at year n_years; opt-in
 
 
 @dataclass
@@ -378,36 +391,24 @@ class SORRResult:
 
 
 @dataclass
-class JointProbabilityResult:
-    accumulation_p50: float
-    accumulation_tail: float
-    tail_pct: int
-    p_survive_from_p50: float
-    p_survive_from_tail: float
-    joint_p50: float    # 0.50 × p_survive_from_p50
-    joint_tail: float   # tail_pct/100 × p_survive_from_tail
-
-
-@dataclass
 class AllocationSweepPoint:
     bonds_pct: float            # bonds allocation at retirement start
     stock_pct_start: float      # = 1 - bonds_pct (glide path start)
     required_portfolio: float   # deterministic required portfolio for this allocation
     net_income_rate: float      # portfolio net income rate
-    survival_yr20_fixed: float
-    survival_yr30_fixed: float
-    survival_yr30_gk: float
-    survival_yr35_gk: float
-    survival_yr40_gk: float
+    survival_by_year_fixed: list[float]   # length = horizon, fixed strategy
+    survival_by_year_gk: list[float]      # length = horizon, GK strategy
 
 
 @dataclass
 class AllocationSweepResult:
     points: list[AllocationSweepPoint]
-    optimal_bonds_pct: float    # bonds_pct with highest survival_yr30_gk
+    optimal_bonds_pct: float    # bonds_pct with highest yr-{horizon} GK survival
     glide_end_pct: float        # stock% at end of glide
     glide_years: int            # years to complete glide
     base_bonds_pct: float       # bonds_pct from config (current plan)
+    horizon_years: int          # decumulation horizon (config-derived)
+    pension_start_year: int     # pension start year (config-derived; used for milestone selection)
 
 
 @dataclass
@@ -429,8 +430,7 @@ class InflationCagrGrid:
 
 @dataclass
 class DecumInflationCagrCell:
-    survival_yr30: float
-    survival_yr40: float
+    survival_by_year: list[float]   # length = horizon
 
 
 @dataclass
@@ -441,22 +441,24 @@ class DecumInflationCagrGrid:
     base_cagr: float
     base_inflation: float
     grid: list[list[DecumInflationCagrCell]]  # [inflation_idx][cagr_idx]
+    horizon_years: int              # decumulation horizon (config-derived)
+    pension_start_year: int         # used for milestone selection
 
 
 @dataclass
 class SWRSweepPoint:
     swr: float              # annual withdrawal rate (decimal, e.g. 0.028)
     monthly_withdrawal: float
-    survival_yr20: float
-    survival_yr30: float
-    survival_yr40: float
+    survival_by_year: list[float]   # length = horizon
 
 
 @dataclass
 class SWRSweepResult:
     points: list[SWRSweepPoint]
-    config_swr: float        # SWR from config (decimal)
-    display_portfolio: float  # portfolio used for all rows
+    config_swr: float           # SWR from config (decimal)
+    display_portfolio: float    # portfolio used for all rows
+    horizon_years: int          # decumulation horizon (config-derived)
+    pension_start_year: int     # used for milestone selection
 
 
 @dataclass
@@ -470,6 +472,82 @@ class ChainedMCResult:
     cond_survival_accum_success: float   # P(survive | accum >= required)
     cond_survival_accum_fail: float      # P(survive | accum < required)
     starting_portfolio_percentiles: dict[int, float]   # P5/P25/P50/P75/P95 of year-N wealth
+    # Optional secondary threshold for the "Paths reaching ≥ required" row only —
+    # used to display the stricter accum income-formula bar alongside the looser
+    # decum survival-minimum bar. Both fields populated together or both None.
+    secondary_required_portfolio: float | None = None
+    secondary_required_label: str | None = None
+    secondary_accum_success_frac: float | None = None
+
+
+@dataclass
+class WealthPreservationRow:
+    """One scenario row of the SORR × wealth preservation matrix.
+
+    For each end-wealth ratio, reports the best P(final ≥ ratio × initial) achievable
+    across the bonds-allocation grid, plus the allocation that achieves it.
+    """
+    scenario_label: str
+    best_p_by_ratio: list[float]         # parallel to end_wealth_ratios
+    best_alloc_by_ratio: list[float]     # bonds_pct that achieves best_p_by_ratio
+    p_at_current_by_ratio: list[float]   # P at current config allocation
+
+
+@dataclass
+class WealthPreservationUnderSORR:
+    """SORR × end-wealth preservation matrix at fixed starting wealth.
+
+    Replaces the survival-centric framing with a preservation-centric one: for each
+    SORR scenario × end-wealth target, what's the best P of preserving that fraction
+    of starting wealth, and what allocation achieves it?
+    """
+    horizon_years: int
+    initial_wealth: float                # fixed starting portfolio
+    target_success_pct: int              # threshold for ✓/✗ on individual cells
+    current_bonds_pct: float
+    bonds_pct_grid: list[float]
+    end_wealth_ratios: list[float]       # column headers as decimal (0.50 → 1.10)
+    rows: list[WealthPreservationRow]    # baseline + 3 SORR scenarios = 4 rows
+    # Pre-pension bridge milestone (baseline scenario, current allocation only)
+    bridge_year: int
+    bridge_p3: float
+    bridge_p50: float
+    bridge_p97: float
+    bridge_survival: float
+
+
+@dataclass
+class CanonicalFIRequiredRow:
+    """One row of the canonical FI required scan: smallest wealth W where
+    P(final ≥ preserve_ratio × W) clears both confidence thresholds at the
+    optimal allocation."""
+    preserve_ratio: float                # X (decimal: 0.50 → 1.00)
+    required_wealth_eur: float           # W*(X) — smallest wealth satisfying both bounds
+    optimal_bonds_pct: float             # allocation that achieves it (decimal)
+    achieved_baseline_p: float           # P(final ≥ X·W) under baseline at the optimum
+    achieved_stress_p: float             # P(final ≥ X·W) under worst-SORR at the optimum
+    reachable: bool                      # False if no W in search range satisfies both
+
+
+@dataclass
+class CanonicalFIRequiredScan:
+    """Scan of W*(X) for X ∈ {0.50, 0.60, …, 1.00}, plus the canonical pick.
+
+    The canonical row is the one whose preserve_ratio matches
+    config.fi_preservation_ratio — that row's required_wealth_eur is the bar
+    accumulation targets.
+    """
+    horizon_years: int
+    target_monthly_withdrawal: float
+    confidence_baseline: float           # Y from config
+    confidence_stress: float             # Z from config
+    worst_stress_label: str              # which SORR sequence binds
+    bonds_pct_grid: list[float]          # allocations searched
+    rows: list[CanonicalFIRequiredRow]   # one per preserve_ratio
+    canonical_ratio: float               # = config.fi_preservation_ratio
+    canonical_required_wealth: float     # = rows[canonical_ratio].required_wealth_eur
+    canonical_optimal_bonds_pct: float   # alloc that achieves the canonical bar
+    canonical_reachable: bool            # was the canonical bar achievable in search range?
 
 
 @dataclass
@@ -497,7 +575,7 @@ class CagrRealismSnapshot:
 @dataclass
 class DecumulationSummary:
     """Typed values from main_decumulation — used by Plan Snapshot."""
-    required_portfolio_income: float         # income-formula required portfolio
+    required_portfolio_fi_canonical: float   # canonical FI bar (preservation-calibrated); see fi_preservation_* config
     target_monthly_withdrawal: float         # nominal monthly withdrawal at horizon
     n_years: int                              # decumulation horizon
     survival_fixed_final: float              # final-year survival, fixed-withdrawal strategy

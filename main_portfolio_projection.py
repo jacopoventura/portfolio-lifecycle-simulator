@@ -297,6 +297,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--cagr", default=None,
                         help="override stock CAGR for projection / MC planning "
                              "(accepts 4, 4.0, 0.04, '4%%'); per-run only")
+    parser.add_argument("--target-required-portfolio", type=float, default=None,
+                        dest="target_required_portfolio",
+                        help="override the required portfolio at horizon (€). When set, "
+                             "replaces the IT income-formula required portfolio used for "
+                             "Plan-B sizing, success-rate, and contribution targeting. "
+                             "Intended to receive the canonical FI bar computed by the "
+                             "decumulation pipeline.")
     args, _ = parser.parse_known_args()
     return args
 
@@ -343,6 +350,12 @@ def _compute_all(config: Config, args: argparse.Namespace) -> ReportContext:
     target_annual_net_income = future_monthly_income_value * 12
     projection_result = run_projection(config, stock_expected_yield)
 
+    # At-retirement gain fraction: (final_stock - cost_basis) / final_stock on day 1
+    # of decumulation. Captures the tax rate paid on year-1 withdrawals only. As decum
+    # progresses, cost basis erodes and this fraction rises toward 1.0; the decumulation
+    # MC uses a 0.65 horizon-averaged proxy (monte_carlo.py:1497, 1628, 1706, 2008).
+    # Keep this at the at-retirement value here: scenario_yield breakdowns and contribution
+    # sizing reason about day-1 economics, not lifetime averages.
     gain_stock = max(
         0.0, projection_result.final_stock_value - projection_result.cost_basis_stock
     )
@@ -351,6 +364,7 @@ def _compute_all(config: Config, args: argparse.Namespace) -> ReportContext:
         if projection_result.final_stock_value > 0 else 0.0
     )
 
+    target_required_override = getattr(args, "target_required_portfolio", None)
     scenario_1_result = run_scenario(
         name="SCENARIO 1 (DE)",
         config=config,
@@ -364,6 +378,7 @@ def _compute_all(config: Config, args: argparse.Namespace) -> ReportContext:
         stock_gain_fraction=stock_gain_fraction,
         stock_teilfreistellung=config.teilfreistellung,
         annual_contribution_growth=config.annual_contribution_growth_percent / 100,
+        required_total_portfolio_override=target_required_override,
     )
     scenario_2_result = run_scenario(
         name="SCENARIO 2 (IT)",
@@ -378,6 +393,7 @@ def _compute_all(config: Config, args: argparse.Namespace) -> ReportContext:
         stock_gain_fraction=stock_gain_fraction,
         stock_teilfreistellung=1.0,
         annual_contribution_growth=config.annual_contribution_growth_percent / 100,
+        required_total_portfolio_override=target_required_override,
     )
     projected_yield_scenario_1 = calculate_projection_yield_for_scenario(
         name="SCENARIO 1 (DE)",
@@ -706,7 +722,7 @@ def _print_action_plan(config_toml_text: str, verbose_report: str, clean_summary
         print(f"\n  Action plan failed: {error}")
 
 
-def main() -> tuple[float, float, float | None, int, str, str, str] | None:
+def main() -> tuple[float, float, float | None, int, float, str, str, str] | None:
     args = _parse_args()
     if not args.no_clear:
         clear_terminal()
@@ -737,6 +753,7 @@ def main() -> tuple[float, float, float | None, int, str, str, str] | None:
         ctx.mc2.final_portfolio_percentiles.get(tail_pct_int, 0.0),
         ctx.cagr_stock_s2,
         tail_pct_int,
+        ctx.scenario_2_result.required_total_portfolio,
         verbose_report,
         clean_summary,
         config_toml_text,
