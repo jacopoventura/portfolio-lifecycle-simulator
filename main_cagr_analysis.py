@@ -1445,7 +1445,8 @@ def print_portfolio_final_summary(
             return (0, strat.portfolio_cagr_p50)
         return (0, strat.portfolio_cagr)
 
-    # Collect candidates in display order, then rank to find top-1 / top-2.
+    # Collect candidates, sort by P50 (descending) for display, then rank
+    # separately by _row_score to find top-1 / top-2 stars.
     candidates: list[tuple[str, "OptimalPortfolioResult", "PortfolioStrategy"]] = []
     if strategy_key in opt_result.strategies:
         candidates.append(("all", opt_result, opt_result.strategies[strategy_key]))
@@ -1453,6 +1454,12 @@ def print_portfolio_final_summary(
         for k, result in sweep:
             if strategy_key in result.strategies:
                 candidates.append((str(k), result, result.strategies[strategy_key]))
+
+    def _p50_for_sort(strat: "PortfolioStrategy") -> float:
+        val = strat.portfolio_cagr_p50 if strat.portfolio_cagr_p50 is not None else strat.portfolio_cagr
+        return val if val is not None else -float("inf")
+
+    candidates.sort(key=lambda c: _p50_for_sort(c[2]), reverse=True)
 
     ranked_labels = [c[0] for c in sorted(candidates,
                                           key=lambda c: _row_score(c[2]),
@@ -1477,6 +1484,7 @@ def print_portfolio_final_summary(
     W = fixed + alloc_w
     print(f"{'OPTIMAL PORTFOLIO — FINAL SUMMARY':^{W}}")
     print(f"  Strategy : {strat_label}   ·   ★ recommended   ☆ runner-up   ·   ⚠ = P5 from < 10y rolling (etf history short)")
+    print(f"  Portfolios ordered by P50")
     print()
 
     # Common window — drives the etf-window reference row below.

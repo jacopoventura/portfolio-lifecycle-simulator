@@ -1,15 +1,18 @@
 import datetime
 
 from models import (
+    CagrRealismSnapshot,
     Config,
     ContributionCagrGrid,
     CombinedGrid,
+    DecumulationSummary,
     FinancialFreedomResult,
     MonteCarloResult,
     OptimalAllocationResult,
     ProjectionResult,
     ScenarioResult,
     SensitivityWaterfallResult,
+    VerdictInputs,
     YearsToTargetsResult,
 )
 from reports.formatters import (
@@ -394,6 +397,7 @@ def print_takeaway(
     target_success: float,
     future_monthly_income: float,
     target_annual_net_income: float,
+    invested_stock_amount: float,
     years_de: YearsToTargetsResult | None = None,
     years_it: YearsToTargetsResult | None = None,
     ff_de: FinancialFreedomResult | None = None,
@@ -435,6 +439,16 @@ def print_takeaway(
           f" · bonds {format_currency(b_mo)}/mo"
           f" · cash {format_currency(c_mo)}/mo")
 
+    tail_pct = 100 - target_pct
+    if invested_stock_amount > 0 and 50 in mc1.final_stock_percentiles and tail_pct in mc1.final_stock_percentiles:
+        gain_p50 = mc1.final_stock_percentiles[50] - invested_stock_amount
+        gain_tail = mc1.final_stock_percentiles[tail_pct] - invested_stock_amount
+        ratio_p50 = gain_p50 / invested_stock_amount * 100
+        ratio_tail = gain_tail / invested_stock_amount * 100
+        print(f"     Stock gain (vs {format_currency(invested_stock_amount)} invested):"
+              f"  P50 {format_currency_signed(gain_p50)} ({ratio_p50:+.1f}%)"
+              f"  ·  P{tail_pct} {format_currency_signed(gain_tail)} ({ratio_tail:+.1f}%)")
+
     def _yr_seg(label: str, yrs: int | None) -> str:
         if yrs is None:
             return f"{label} not achievable"
@@ -456,6 +470,8 @@ def print_takeaway(
         #                taxable-gain accounting via ff (more accurate than
         #                the constant effective_stock_tax_rate used in
         #                years_to_targets.years_to_income).
+        # Both use the *income-formula* FI bar (W₀ ≈ target/yield); the
+        # preservation-calibrated answer lives in decum's tradeoff table.
         if yrs_target is not None or ff is not None:
             yrs_both = yrs_target.years_to_both if yrs_target is not None else None
             yrs_inc  = ff.years if ff is not None else None
@@ -580,3 +596,114 @@ def print_takeaway(
             parts.append(f"{e.parameter} ({side} {e.delta_label}) → {worst * 100:+.1f}pp")
         print(f"     {tag} : " + "  ·  ".join(parts) if parts else f"     {tag} : n/a")
     print()
+
+
+def print_final_verdict(
+    verdict: VerdictInputs,
+    decum_summary: DecumulationSummary | None,
+    realism: CagrRealismSnapshot | None,
+) -> None:
+    """Consolidated end-of-run verdict: status, current allocation, two or three
+    levers to close the gap, and a model-risk watch line. Pulls from data already
+    computed by accum + decum + cagr — no new MC."""
+    config = verdict.config
+    mc = verdict.mc_it
+    target_success = verdict.target_success
+    target_pct = int(round(target_success * 100))
+
+    monthly_saving = config.annual_net_saving / 12
+    cur_stocks = monthly_saving * config.maximum_stock_monthly_investment_pct
+    cur_bonds = monthly_saving * config.maximum_bonds_monthly_investment_pct
+    cur_total = cur_stocks + cur_bonds
+    target_today = config.target_monthly_retirement_income
+    horizon = int(round(config.years))
+    income_p = mc.success_rate_income_only
+    on_track = income_p >= target_success
+
+    print()
+    print("─" * 80)
+    print(f"{'FINAL VERDICT':^80}")
+    print("─" * 80)
+    print(f"  Scope: IT scenario · {horizon}y horizon · target €{format_currency(target_today)}/mo today's €")
+    print()
+
+    if on_track:
+        print(f"  ✓ ON TRACK — income success {income_p * 100:.1f}% ≥ {target_pct}% target")
+        print(f"    at current allocation: stocks €{format_currency(cur_stocks)} + "
+              f"bonds €{format_currency(cur_bonds)} = €{format_currency(cur_total)}/mo")
+        _verdict_watch(config, realism)
+        print()
+        return
+
+    # Off-track: print why + levers.
+    print(f"  ✗ NOT ON TRACK at current allocation:")
+    print(f"      stocks €{format_currency(cur_stocks)} + bonds €{format_currency(cur_bonds)} "
+          f"= €{format_currency(cur_total)}/mo")
+    print(f"      → income success {income_p * 100:.1f}% (need {target_pct}%)")
+    print()
+
+    # Lever A — raise saving at fixed-CAGR min split.
+    assumed = config.expected_yearly_growth_stocks_percent / 100
+    cagr_idx = _closest_cagr_idx(verdict.grids_it[0].cagr_values, assumed)
+    a_stocks, a_bonds, a_p = _find_min_total_income_split(verdict.grids_it, cagr_idx, target_success)
+    a_total = a_stocks + a_bonds
+    a_delta = a_total - cur_total
+    a_stock_delta = a_stocks - cur_stocks
+    a_bond_delta = a_bonds - cur_bonds
+    a_flag = "✓" if a_p >= target_success else " "
+    print(f"  Lever A  (raise saving): stocks €{format_currency(a_stocks)} + "
+          f"bonds €{format_currency(a_bonds)} = €{format_currency(a_total)}/mo")
+    print(f"           vs current: {_signed_eur_delta(a_stock_delta)} stocks · "
+          f"{_signed_eur_delta(a_bond_delta)} bonds · "
+          f"{_signed_eur_delta(a_delta)} net")
+    print(f"           → income success {a_flag}{a_p * 100:.1f}%")
+
+    # Lever B — extend horizon. From decum tradeoff: first row where Max safe WD ≥ target.
+    if decum_summary is not None and decum_summary.tradeoff_first_safe_year_from_now is not None:
+        yrs = decum_summary.tradeoff_first_safe_year_from_now
+        wd = decum_summary.tradeoff_first_safe_wd_today or 0.0
+        print(f"  Lever B  (extend horizon): keep current saving + allocation, retire in ~{yrs}y")
+        print(f"           → Max safe WD €{format_currency(wd)}/mo today's € ≥ €{format_currency(target_today)} target")
+    else:
+        print(f"  Lever B  (extend horizon): target spend not reached within the tradeoff window")
+
+    # Lever C — redeploy existing cash via the optimizer.
+    p = _best_income_point(verdict.opt_result_it)
+    if p is not None:
+        moves = []
+        if p.extra_stocks > 0:
+            moves.append(f"€{format_currency(p.extra_stocks)} cash→stocks")
+        if p.extra_bonds > 0:
+            moves.append(f"€{format_currency(p.extra_bonds)} cash→bonds")
+        move_str = " + ".join(moves) if moves else "no upfront move"
+        c_flag = "✓" if p.best_success_rate >= target_success else " "
+        c_total = p.income_stock_mo + p.income_bonds_mo
+        print(f"  Lever C  (redeploy cash): {move_str}, then stocks €{format_currency(p.income_stock_mo)}/mo + "
+              f"bonds €{format_currency(p.income_bonds_mo)}/mo (total €{format_currency(c_total)}/mo)")
+        print(f"           → income success {c_flag}{p.best_success_rate * 100:.1f}%")
+
+    _verdict_watch(config, realism)
+    print()
+
+
+def _signed_eur_delta(v: float) -> str:
+    """Render a € delta with explicit sign: '+€636' / '-€500' / '€0'."""
+    if v > 0:
+        return f"+€{format_currency(v)}"
+    if v < 0:
+        return f"-€{format_currency(-v)}"
+    return "€0"
+
+
+def _verdict_watch(config: Config, realism: CagrRealismSnapshot | None) -> None:
+    """One-line model-risk watch — planning CAGR vs CAPE-implied."""
+    planning = config.planning_cagr
+    if realism is None or realism.cape_nominal_cagr is None:
+        return
+    cape = realism.cape_nominal_cagr
+    delta = planning - cape
+    if delta > 0.02:
+        print(f"  Watch    : planning CAGR {planning * 100:.1f}% > CAPE-implied {cape * 100:.1f}% "
+              f"— if returns disappoint, any gap widens")
+    elif delta < -0.02:
+        print(f"  Watch    : planning CAGR {planning * 100:.1f}% < CAPE-implied {cape * 100:.1f}% — conservative")

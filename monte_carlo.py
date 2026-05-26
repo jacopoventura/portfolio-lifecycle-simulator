@@ -5,7 +5,12 @@ from typing import NamedTuple
 
 import numpy as np
 
-from finance import cash_converted_to_bonds_at_horizon, calculate_required_monthly_contribution
+from finance import (
+    cash_converted_to_bonds_at_horizon,
+    calculate_required_monthly_contribution,
+    compute_it_deterministic_projection,
+    compute_it_required_portfolio,
+)
 from models import (
     AllocationGridPoint,
     AllocationSweepPoint,
@@ -33,6 +38,9 @@ from models import (
     SensitivityWaterfallResult,
     CanonicalFIRequiredRow,
     CanonicalFIRequiredScan,
+    FocusedPreservationTable,
+    YearsToRetirementRow,
+    YearsToRetirementTradeoff,
     SORRResult,
     WealthPreservationRow,
     WealthPreservationUnderSORR,
@@ -1326,6 +1334,13 @@ _SORR_SEQUENCES: list[tuple[str, list[float]]] = [
     ("Historical 2008-2009",   [-0.37, +0.26]),
 ]
 
+# Effective modified duration of the bond sleeve, in years. Used in decumulation
+# to mark bond principal to market as -duration × Δyield each year. 7y matches
+# typical EUR aggregate bond ETFs (AGGH, IEAG); long-bond funds run ~10y, short
+# funds ~3-5y. Could be promoted to config if you sweep allocations across
+# different bond durations.
+_DECUM_BOND_DURATION_YEARS = 7.0
+
 
 def _run_decum_loop(
     annual_stock_returns: np.ndarray,
@@ -1344,12 +1359,20 @@ def _run_decum_loop(
     glide_years: int = 0,
     effective_stock_tax_rate: float = 0.0,
     return_final_portfolios: bool = False,
+    bond_duration_years: float = _DECUM_BOND_DURATION_YEARS,
+    initial_bond_yield: float | None = None,
 ) -> DecumulationResult:
     """Core decumulation year-loop. All simulation work is vectorised.
 
     Glide path: when glide_years > 0, stock allocation linearly shifts from the
     initial fraction toward stock_pct_end over glide_years years, then stays fixed.
     Annual rebalancing runs after stock growth, before withdrawals.
+
+    Bond mark-to-market: each year bond principal is multiplied by
+    (1 − duration × Δy). Δy is the year-over-year change in the yield draw,
+    with the prior-year reference for year 0 set to `initial_bond_yield`
+    (defaults to the mean of year-0 draws, so the year-0 shock averages to
+    zero across sims).
     """
     n_sims = len(initial_stock_v)
     stock_v = initial_stock_v.copy()
@@ -1359,6 +1382,10 @@ def _run_decum_loop(
     stock_pct_start = float(initial_stock_v[0] / initial_total) if initial_total > 0 else 0.0
     stock_allocation = stock_pct_start
     _glide_active = glide_years > 0 and stock_pct_end >= 0.0 and stock_pct_end != stock_pct_start
+
+    if initial_bond_yield is None:
+        initial_bond_yield = float(np.mean(annual_bond_yields[:, 0])) if n_years > 0 else 0.0
+    prev_yield = np.full(n_sims, float(initial_bond_yield))
 
     alive = np.ones(n_sims, dtype=bool)
     cum_inf = np.ones(n_sims)
@@ -1373,12 +1400,22 @@ def _run_decum_loop(
     withdrawal_pcts_by_year: list[dict[int, float]] = []
 
     for year in range(n_years):
-        # 1. Grow stocks (bonds stay at par — coupon extracted below)
+        # 1. Grow stocks
         stock_fv, _ = _vec_annuity_factor(annual_stock_returns[:, year])
         stock_v = stock_v * stock_fv
 
+        # 1b. Bond mark-to-market: principal moves by -duration × Δy where
+        # Δy = current yield − prior-year yield. Floor at 0.1× principal so
+        # extreme yield spikes can't drive nominal principal below zero
+        # (real bond ETFs can lose ~50% but not be wiped out by rate moves).
+        cur_yield = annual_bond_yields[:, year]
+        dy = cur_yield - prev_yield
+        price_factor = np.maximum(1.0 - bond_duration_years * dy, 0.1)
+        bond_v = bond_v * price_factor
+        prev_yield = cur_yield
+
         # 2. Bond coupon: yield × principal × (1 − tax), net annual income
-        bond_coupon = bond_v * np.maximum(annual_bond_yields[:, year], 0.0) * (1.0 - bond_tax_rate)
+        bond_coupon = bond_v * np.maximum(cur_yield, 0.0) * (1.0 - bond_tax_rate)
 
         # 3. Cumulative inflation (per-simulation, AR(1) model)
         cum_inf = cum_inf * (1.0 + annual_inflations[:, year])
@@ -1442,10 +1479,16 @@ def _run_decum_loop(
         portfolio_pcts_by_year.append(
             {p: float(np.percentile(portfolio_total, p)) for p in _PCTS}
         )
-        eff_wd = np.where(alive, (residual + passive_income) / 12.0, np.nan)
-        withdrawal_pcts_by_year.append(
-            {p: float(np.nanpercentile(eff_wd, p)) for p in (10, 50, 90)}
-        )
+        # Effective monthly withdrawal: NaN for dead paths so percentiles ignore them.
+        # When every path is dead (e.g. probing huge withdrawal in WR back-solve)
+        # nanpercentile would warn "All-NaN slice"; short-circuit to zeros instead.
+        if alive.any():
+            eff_wd = np.where(alive, (residual + passive_income) / 12.0, np.nan)
+            withdrawal_pcts_by_year.append(
+                {p: float(np.nanpercentile(eff_wd, p)) for p in (10, 50, 90)}
+            )
+        else:
+            withdrawal_pcts_by_year.append({p: 0.0 for p in (10, 50, 90)})
 
     failed = ruin_years > 0
     ruin_year_median = int(np.median(ruin_years[failed])) if np.any(failed) else None
@@ -2173,8 +2216,12 @@ def compute_canonical_fi_required_scan(
 
     For each X ∈ preserve_ratios, binary-searches the smallest starting wealth W
     such that, at some bonds allocation in bonds_pct_grid:
-        P(final ≥ X · W | baseline returns) ≥ config.fi_preservation_confidence_baseline
-        P(final ≥ X · W | worst SORR scenario) ≥ config.fi_preservation_confidence_stress
+        P(real_final ≥ X · W | baseline returns) ≥ config.fi_preservation_confidence_baseline
+        P(real_final ≥ X · W | worst SORR scenario) ≥ config.fi_preservation_confidence_stress
+
+    "real_final" = nominal final wealth / per-sim cumulative inflation, so
+    preservation is measured in today's € (real terms). Otherwise par-stable
+    bonds win trivially and the bonds optimum just saturates at the grid cap.
 
     Returns the scan plus the canonical row (X = config.fi_preservation_ratio).
     The 'worst' SORR scenario is selected dynamically as the one with lowest
@@ -2237,9 +2284,16 @@ def compute_canonical_fi_required_scan(
         )
         return np.asarray(res.final_portfolios)
 
+    # Per-simulation cumulative inflation over the horizon. Used to deflate
+    # nominal final wealth back to today's € so preservation is measured in
+    # REAL terms — otherwise 100% bonds (par-stable, positive coupon) wins
+    # any nominal preservation contest trivially and the bonds optimum just
+    # saturates at the grid cap.
+    cum_inf_final = np.prod(1.0 + inflations, axis=1)
+
     # ── Pick the worst-SORR scenario at the search ceiling ───────────────────
     # Run a single MC at hi × current allocation under each SORR; whichever gives
-    # the lowest P(final ≥ 50% of hi) is the binding stress for the canonical.
+    # the lowest P(real final ≥ 50% of hi) is the binding stress for the canonical.
     sa_cur = 1.0 - current_bonds
     worst_label = _SORR_SEQUENCES[0][0]
     worst_p = 1.0
@@ -2250,8 +2304,8 @@ def compute_canonical_fi_required_scan(
         for t, r in enumerate(seq):
             if t < ny:
                 patched[:, t] = r
-        finals = _final_portfolios(hi, current_bonds, patched)
-        p = float(np.mean(finals >= probe_target))
+        finals_real = _final_portfolios(hi, current_bonds, patched) / cum_inf_final
+        p = float(np.mean(finals_real >= probe_target))
         if p < worst_p:
             worst_p = p
             worst_label = label
@@ -2268,7 +2322,12 @@ def compute_canonical_fi_required_scan(
     def _feasible(W: float, X: float) -> tuple[bool, float, float, float]:
         """At wealth W with preserve_ratio X, find the best allocation that
         satisfies both confidences. Returns (feasible, optimal_bonds_pct,
-        baseline_p, stress_p)."""
+        baseline_p, stress_p).
+
+        Preservation is checked in REAL terms: final nominal wealth is divided
+        by per-sim cumulative inflation before comparing to X·W (where W is
+        today's €). Without this, nominal-par bonds win trivially.
+        """
         target_wealth = X * W
         best_meets = False
         best_alloc = bonds_pct_grid[0]
@@ -2276,8 +2335,10 @@ def compute_canonical_fi_required_scan(
         best_stress_p = 0.0
         best_slack = -float("inf")  # slack = min(baseline_p - Y, stress_p - Z)
         for bonds_pct in bonds_pct_grid:
-            base_p = float(np.mean(_final_portfolios(W, bonds_pct, baseline_stocks) >= target_wealth))
-            strs_p = float(np.mean(_final_portfolios(W, bonds_pct, worst_stocks) >= target_wealth))
+            base_finals_real = _final_portfolios(W, bonds_pct, baseline_stocks) / cum_inf_final
+            strs_finals_real = _final_portfolios(W, bonds_pct, worst_stocks) / cum_inf_final
+            base_p = float(np.mean(base_finals_real >= target_wealth))
+            strs_p = float(np.mean(strs_finals_real >= target_wealth))
             meets = (base_p >= Y) and (strs_p >= Z)
             # Slack: how much margin we have on the binding constraint
             slack = min(base_p - Y, strs_p - Z)
@@ -2359,3 +2420,588 @@ def compute_canonical_fi_required_scan(
         canonical_optimal_bonds_pct=canonical_row.optimal_bonds_pct,
         canonical_reachable=canonical_row.reachable,
     )
+
+
+# ── Focused preservation table ────────────────────────────────────────────────
+
+def compute_focused_preservation_table(
+    config: Config,
+    target_monthly_nom: float,
+    *,
+    bonds_pct_grid: list[float] | None = None,
+    confidence: float = 0.95,
+    preserve_ratio: float | None = None,
+    lo: float = 100_000.0,
+    hi: float = 50_000_000.0,
+    tolerance: float = 5_000.0,
+    seed: int = 42,
+    n_simulations: int = 5_000,
+    monthly_stock_contribution: float | None = None,
+    monthly_bond_contribution: float | None = None,
+) -> FocusedPreservationTable:
+    """Decumulation summary anchored on the user's actual trajectory.
+
+    Q1: At the projected retirement wealth (deterministic AND MC P50), what's
+        P(real final wealth ≥ preserve_ratio · projection) at current alloc?
+    Q2: What's the smallest monthly contribution where the deterministic
+        projection at retirement equals Q3's target wealth? (Accumulation lever.)
+    Q3: What's the smallest starting wealth W where P(preserve ≥X·W) ≥ confidence
+        at the best allocation? (Target-wealth lever.)
+
+    Real-€ comparisons throughout: nominal final wealth / per-sim cumulative
+    inflation. preserve_ratio defaults to config.fi_preservation_ratio.
+    """
+    if preserve_ratio is None:
+        preserve_ratio = config.fi_preservation_ratio
+    if bonds_pct_grid is None:
+        bonds_pct_grid = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+    if monthly_stock_contribution is None:
+        monthly_stock_contribution = (
+            config.annual_net_saving / 12.0 * config.maximum_stock_monthly_investment_pct
+        )
+    if monthly_bond_contribution is None:
+        monthly_bond_contribution = (
+            config.annual_net_saving / 12.0 * config.maximum_bonds_monthly_investment_pct
+        )
+
+    current_bonds = config.bonds_percentage / 100.0
+    if not any(abs(b - current_bonds) < 1e-6 for b in bonds_pct_grid):
+        bonds_pct_grid = sorted(bonds_pct_grid + [current_bonds])
+
+    n = n_simulations
+    ny = config.mc_decumulation_years
+    btr = config.tax_rate_bond_italy
+    eff_stock_tax = 0.65 * config.decum_teilfreistellung * config.tax_rate
+
+    # ── Anchors at retirement ────────────────────────────────────────────────
+    # PRIMARY anchor = IT required portfolio (income-formula bar from pillar 1).
+    # SECONDARY anchor = IT deterministic projection (what the plan delivers).
+    # Both via finance.py to keep this script in lock-step with main_portfolio_projection.
+    accum_years = int(round(config.years))
+    it_required_portfolio = compute_it_required_portfolio(config)
+    it_projected_portfolio = compute_it_deterministic_projection(
+        config,
+        monthly_stock_contribution_override=monthly_stock_contribution,
+        monthly_bonds_contribution_override=monthly_bond_contribution,
+    )
+
+    # ── Decumulation MC paths (shared across Q1 and Q3) ──────────────────────
+    ss = config.mc_stock_return_std_percent / 100.0
+    is_ = config.mc_inflation_std_percent / 100.0
+    rng = np.random.default_rng(seed)
+    stock_returns, inflations, bond_yields = _generate_mc_returns(
+        rng, n, ny,
+        config.planning_cagr, ss,
+        config.expected_inflation_percent / 100.0, is_,
+        config.yield_bonds / 100.0, config.mc_bond_yield_std_percent / 100.0,
+        inflation_ar1_phi=config.mc_inflation_ar1_phi,
+        stock_return_df=config.mc_stock_return_df,
+        stock_bond_corr=config.mc_stock_bond_correlation,
+        stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
+        stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
+        stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+    )
+    cum_inf_final = np.prod(1.0 + inflations, axis=1)
+
+    loop_common = dict(
+        annual_inflations=inflations,
+        annual_bond_yields=bond_yields,
+        initial_monthly_wd=target_monthly_nom,
+        n_years=ny,
+        withdrawal_strategy="fixed",
+        bond_tax_rate=btr,
+        pension_monthly=config.mc_decumulation_pension_monthly,
+        pension_start_year=config.mc_decumulation_pension_start_year,
+        pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
+        stock_pct_end=config.mc_decumulation_glide_end_pct,
+        glide_years=config.mc_decumulation_glide_years,
+        effective_stock_tax_rate=eff_stock_tax,
+        return_final_portfolios=True,
+    )
+
+    def _real_finals(wealth: float, bonds_pct: float) -> np.ndarray:
+        sa = 1.0 - bonds_pct
+        res = _run_decum_loop(
+            annual_stock_returns=stock_returns,
+            initial_stock_v=np.full(n, wealth * sa),
+            initial_bond_v=np.full(n, wealth * (1.0 - sa)),
+            **loop_common,
+        )
+        return np.asarray(res.final_portfolios) / cum_inf_final
+
+    def _real_finals_with_survival(wealth: float, bonds_pct: float) -> tuple[np.ndarray, float]:
+        sa = 1.0 - bonds_pct
+        res = _run_decum_loop(
+            annual_stock_returns=stock_returns,
+            initial_stock_v=np.full(n, wealth * sa),
+            initial_bond_v=np.full(n, wealth * (1.0 - sa)),
+            **loop_common,
+        )
+        return np.asarray(res.final_portfolios) / cum_inf_final, res.survival_rate
+
+    # Inflation factor across accumulation horizon (used to convert nominal-at-retirement
+    # quantities into today's-€ equivalents for reporting).
+    accum_infl_factor = (1.0 + config.expected_inflation_percent / 100.0) ** config.years
+
+    # ── Q1: preservation probability at the two anchors ──────────────────────
+    # Primary: IT required portfolio. Secondary: IT projected portfolio.
+    finals_req, survival_req = _real_finals_with_survival(it_required_portfolio, current_bonds)
+    finals_proj = _real_finals(it_projected_portfolio, current_bonds)
+    q1_p_req = float(np.mean(finals_req >= preserve_ratio * it_required_portfolio))
+    q1_p_proj = float(np.mean(finals_proj >= preserve_ratio * it_projected_portfolio))
+    p50_real_final_req = float(np.median(finals_req))
+    p5_real_final_req = float(np.percentile(finals_req, 5))
+
+    # ── Max sustainable real withdrawal at it_required + current alloc ───────
+    # Largest monthly_wd (nominal at retirement) such that P(preserve ≥X·W) ≥ confidence.
+    def _preserve_prob_at_wd(monthly_wd_nom: float) -> float:
+        sa = 1.0 - current_bonds
+        local_kw = dict(loop_common)
+        local_kw["initial_monthly_wd"] = monthly_wd_nom
+        res = _run_decum_loop(
+            annual_stock_returns=stock_returns,
+            initial_stock_v=np.full(n, it_required_portfolio * sa),
+            initial_bond_v=np.full(n, it_required_portfolio * (1.0 - sa)),
+            **local_kw,
+        )
+        finals = np.asarray(res.final_portfolios) / cum_inf_final
+        return float(np.mean(finals >= preserve_ratio * it_required_portfolio))
+
+    # Search bracket: from 0 (always feasible) up to 5× the current target.
+    lo_w = 0.0
+    hi_w = max(target_monthly_nom * 5.0, 100.0)
+    # If even hi_w meets confidence (very rich portfolio), report the bracket cap.
+    if _preserve_prob_at_wd(hi_w) >= confidence:
+        max_sustainable_monthly_nom = hi_w
+    else:
+        for _ in range(40):
+            if hi_w - lo_w < 1.0:
+                break
+            mid = 0.5 * (lo_w + hi_w)
+            if _preserve_prob_at_wd(mid) >= confidence:
+                lo_w = mid
+            else:
+                hi_w = mid
+        max_sustainable_monthly_nom = lo_w
+    # Convert to real today's €
+    max_sustainable_monthly_real = max_sustainable_monthly_nom / accum_infl_factor if accum_infl_factor > 0 else 0.0
+
+    # ── Q3: smallest wealth meeting confidence at best allocation ────────────
+    def _bs_required_wealth(bonds_pct: float) -> tuple[float, bool]:
+        if float(np.mean(_real_finals(hi, bonds_pct) >= preserve_ratio * hi)) < confidence:
+            return hi, False
+        lo_x, hi_x = lo, hi
+        for _ in range(40):
+            if hi_x - lo_x < tolerance:
+                break
+            mid = 0.5 * (lo_x + hi_x)
+            p = float(np.mean(_real_finals(mid, bonds_pct) >= preserve_ratio * mid))
+            if p >= confidence:
+                hi_x = mid
+            else:
+                lo_x = mid
+        return hi_x, True
+
+    best_w = float("inf")
+    best_bonds = current_bonds
+    any_reachable = False
+    for bonds_pct in bonds_pct_grid:
+        w_b, ok = _bs_required_wealth(bonds_pct)
+        if ok and w_b < best_w:
+            best_w = w_b
+            best_bonds = bonds_pct
+            any_reachable = True
+    if not any_reachable:
+        best_w = hi
+        best_bonds = current_bonds
+    q3_required_wealth = best_w
+
+    # ── Q2: smallest monthly contribution where deterministic projection ≥ Q3 ─
+    current_contrib = monthly_stock_contribution + monthly_bond_contribution
+    if current_contrib > 0:
+        stock_share = monthly_stock_contribution / current_contrib
+    else:
+        stock_share = 1.0 - current_bonds
+
+    def _proj_at_contrib(total_contrib: float) -> float:
+        return compute_it_deterministic_projection(
+            config,
+            monthly_stock_contribution_override=total_contrib * stock_share,
+            monthly_bonds_contribution_override=total_contrib * (1.0 - stock_share),
+        )
+
+    # Reachability: even with very high contribution, can we reach q3?
+    contrib_hi = max(50_000.0, q3_required_wealth / max(accum_years * 12, 1))
+    q2_required_contribution = current_contrib
+    q2_reachable = False
+    if _proj_at_contrib(contrib_hi) >= q3_required_wealth:
+        q2_reachable = True
+        lo_c, hi_c = 0.0, contrib_hi
+        for _ in range(50):
+            if hi_c - lo_c < 1.0:
+                break
+            mid = 0.5 * (lo_c + hi_c)
+            if _proj_at_contrib(mid) >= q3_required_wealth:
+                hi_c = mid
+            else:
+                lo_c = mid
+        q2_required_contribution = hi_c
+    else:
+        q2_required_contribution = contrib_hi
+
+    # Real-€ withdrawal rate (today's €): annual target / it_required-in-today's-€.
+    it_req_today = (
+        it_required_portfolio / accum_infl_factor if accum_infl_factor > 0 else it_required_portfolio
+    )
+    real_monthly_wd = float(config.target_monthly_retirement_income)
+    real_annual_wd_today = real_monthly_wd * 12.0
+    real_wd_rate = real_annual_wd_today / it_req_today if it_req_today > 0 else 0.0
+    max_sustainable_wd_rate = (
+        (max_sustainable_monthly_real * 12.0) / it_req_today if it_req_today > 0 else 0.0
+    )
+
+    return FocusedPreservationTable(
+        horizon_years=ny,
+        target_monthly_withdrawal=target_monthly_nom,
+        confidence=confidence,
+        preserve_ratio=preserve_ratio,
+        current_bonds_pct=current_bonds,
+        it_required_portfolio=it_required_portfolio,
+        it_projected_portfolio=it_projected_portfolio,
+        q1_p_at_it_required=q1_p_req,
+        q1_p_at_it_projected=q1_p_proj,
+        current_monthly_contribution=current_contrib,
+        q2_required_contribution=q2_required_contribution,
+        q2_reachable=q2_reachable,
+        q3_required_wealth=q3_required_wealth,
+        q3_best_bonds_pct=best_bonds,
+        q3_reachable=any_reachable,
+        bonds_pct_grid=bonds_pct_grid,
+        survival_at_it_required=survival_req,
+        real_withdrawal_rate=real_wd_rate,
+        real_monthly_withdrawal=real_monthly_wd,
+        p50_real_final_at_it_required=(
+            p50_real_final_req / it_required_portfolio if it_required_portfolio > 0 else 0.0
+        ),
+        p5_real_final_at_it_required=(
+            p5_real_final_req / it_required_portfolio if it_required_portfolio > 0 else 0.0
+        ),
+        max_sustainable_real_wd_rate=max_sustainable_wd_rate,
+        max_sustainable_monthly_withdrawal=max_sustainable_monthly_real,
+    )
+
+
+# ── FI date pillar — "when can I retire?" ─────────────────────────────────────
+
+def _accumulation_per_year_wealth(
+    config: Config,
+    monthly_stock_contribution: float,
+    monthly_bond_contribution: float,
+    n_years: int,
+    n_paths: int,
+    seed: int,
+    return_stock_only: bool = False,
+) -> "np.ndarray | tuple[np.ndarray, np.ndarray]":
+    """Run accumulation MC and return per-year per-path nominal total wealth.
+
+    Output shape: (n_years + 1, n_paths). Row 0 = today's wealth (no growth yet);
+    row k = wealth at end of year k. Uses the same return model as
+    compute_chained_mc.
+
+    If `return_stock_only=True`, also returns a parallel-shape array of stock-only
+    nominal wealth per year per path. Useful for computing stock-gain distributions.
+    """
+    stock_mean = config.planning_cagr
+    bond_yield = config.yield_bonds / 100
+    stock_std = config.mc_stock_return_std_percent / 100
+    infl_std = config.mc_inflation_std_percent / 100
+    bond_std_pct = config.mc_bond_yield_std_percent / 100
+
+    rng = np.random.default_rng(seed)
+    stock_r, infl_r, bond_r = _generate_mc_returns(
+        rng, n_paths, n_years, stock_mean, stock_std,
+        config.expected_inflation_percent / 100, infl_std,
+        bond_yield, bond_std_pct,
+        inflation_ar1_phi=config.mc_inflation_ar1_phi,
+        stock_return_df=config.mc_stock_return_df,
+        stock_bond_corr=config.mc_stock_bond_correlation,
+        stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
+        stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
+        stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+    )
+
+    stock_v = np.full(n_paths, config.current_stock_value)
+    bond_v = np.full(n_paths, config.current_bonds_value)
+    cash_v = float(config.current_cash)
+
+    cash_rate = config.interest_on_cash_pa / 100
+    monthly_cash_rate = (1 + cash_rate) ** (1 / 12) - 1
+    cash_fv_factor = (1 + monthly_cash_rate) ** 12
+    cash_annuity = (cash_fv_factor - 1) / monthly_cash_rate if monthly_cash_rate > 1e-12 else 12.0
+    annual_growth = config.annual_contribution_growth_percent / 100
+    max_monthly = config.annual_net_saving / 12
+
+    wealth_by_year = np.zeros((n_years + 1, n_paths))
+    wealth_by_year[0] = stock_v + bond_v + cash_v
+    stock_by_year = np.zeros((n_years + 1, n_paths)) if return_stock_only else None
+    if stock_by_year is not None:
+        stock_by_year[0] = stock_v
+
+    for year in range(n_years):
+        stock_fv, stock_ann = _vec_annuity_factor(stock_r[:, year])
+        bond_fv, bond_ann = _vec_annuity_factor(bond_r[:, year])
+        g = (1 + annual_growth) ** year
+        cs = monthly_stock_contribution * g
+        cb = monthly_bond_contribution * g
+        cc = max(0.0, max_monthly * g - cs - cb)
+        stock_v = stock_v * stock_fv + cs * stock_ann
+        bond_v = bond_v * bond_fv + cb * bond_ann
+        cash_v = cash_v * cash_fv_factor + cc * cash_annuity
+        wealth_by_year[year + 1] = stock_v + bond_v + cash_v
+        if stock_by_year is not None:
+            stock_by_year[year + 1] = stock_v
+
+    if return_stock_only:
+        return wealth_by_year, stock_by_year
+    return wealth_by_year
+
+
+# ── Years-to-retirement tradeoff ──────────────────────────────────────────────
+
+def compute_years_to_retirement_tradeoff(
+    config: Config,
+    *,
+    years_list: list[int] | None = None,
+    monthly_stock_contribution: float | None = None,
+    monthly_bond_contribution: float | None = None,
+    preserve_ratio: float | None = None,
+    confidence: float | None = None,
+    n_simulations: int = 2_000,
+    seed: int = 42,
+) -> YearsToRetirementTradeoff:
+    """Sensitivity table: how does the preservation picture change with years
+    to retirement?
+
+    For each N in years_list:
+      • Compute the MC P50 (median) of accumulation wealth at year N — the
+        median actually-reachable wealth, not the deterministic projection
+        which overstates by volatility drag.
+      • Decum horizon = lifespan_age − (current_age + N).
+      • Withdraw the user's fixed real €3,200/mo (today's €) over that horizon,
+        starting from the P50 wealth.
+      • Report: portfolio in today's €, implied real WR, max-sustainable WD
+        (today's €) for P(preserve ≥preserve_ratio) ≥ confidence, P50 and P5
+        real final wealth ratios, baseline survival.
+
+    Two-stage independent MC: accum MC ends at P50, fresh decum MC starts
+    from that single P50 point. Does not capture accum-decum tail correlation.
+    """
+    if years_list is None:
+        years_list = [5, 10, 15, 20, 25, 30]
+    if preserve_ratio is None:
+        preserve_ratio = config.fi_preservation_ratio
+    if confidence is None:
+        confidence = config.fi_preservation_confidence_baseline
+    if monthly_stock_contribution is None:
+        monthly_stock_contribution = (
+            config.annual_net_saving / 12.0 * config.maximum_stock_monthly_investment_pct
+        )
+    if monthly_bond_contribution is None:
+        monthly_bond_contribution = (
+            config.annual_net_saving / 12.0 * config.maximum_bonds_monthly_investment_pct
+        )
+
+    current_bonds = config.bonds_percentage / 100.0
+    btr = config.tax_rate_bond_italy
+    eff_stock_tax = 0.65 * config.decum_teilfreistellung * config.tax_rate
+    real_monthly_target = float(config.target_monthly_retirement_income)
+    real_annual_target = real_monthly_target * 12.0
+    inflation = config.expected_inflation_percent / 100.0
+
+    # One long accumulation MC; pull P50 at each candidate retirement year.
+    max_years_horizon = max(years_list)
+    accum_wealth_by_year_nominal, accum_stock_by_year_nominal = _accumulation_per_year_wealth(
+        config=config,
+        monthly_stock_contribution=monthly_stock_contribution,
+        monthly_bond_contribution=monthly_bond_contribution,
+        n_years=max_years_horizon,
+        n_paths=n_simulations,
+        seed=seed,
+        return_stock_only=True,
+    )
+    annual_contrib_growth = config.annual_contribution_growth_percent / 100.0
+
+    rows: list[YearsToRetirementRow] = []
+    for N in years_list:
+        retirement_age = config.current_age + N
+        decum_horizon = max(1, config.lifespan_age - retirement_age)
+
+        # Accum P50 (median) at year N — the actually-reachable median wealth,
+        # not the deterministic projection which overstates by volatility drag.
+        cfg_year = _dc_replace(config, years=float(N), mc_decumulation_years=decum_horizon)
+        projected_nominal = float(np.percentile(accum_wealth_by_year_nominal[N], 50))
+        infl_accum = (1.0 + inflation) ** N
+        projected_today = projected_nominal / infl_accum if infl_accum > 0 else projected_nominal
+
+        # Target withdrawal at retirement (nominal, inflated to year N).
+        target_monthly_nom_at_N = real_monthly_target * infl_accum
+
+        # MC draws for decum.
+        rng = np.random.default_rng(seed + N)
+        stock_returns, inflations, bond_yields = _generate_mc_returns(
+            rng, n_simulations, decum_horizon,
+            cfg_year.planning_cagr, cfg_year.mc_stock_return_std_percent / 100,
+            cfg_year.expected_inflation_percent / 100, cfg_year.mc_inflation_std_percent / 100,
+            cfg_year.yield_bonds / 100, cfg_year.mc_bond_yield_std_percent / 100,
+            inflation_ar1_phi=cfg_year.mc_inflation_ar1_phi,
+            stock_return_df=cfg_year.mc_stock_return_df,
+            stock_bond_corr=cfg_year.mc_stock_bond_correlation,
+            stock_return_ar1_phi=cfg_year.mc_stock_return_ar1_phi,
+            stock_mean_uncertainty=cfg_year.mc_stock_mean_uncertainty,
+            stock_vol_uncertainty=cfg_year.mc_stock_vol_uncertainty,
+        )
+        cum_inf_final = np.prod(1.0 + inflations, axis=1)
+        loop_common = dict(
+            annual_inflations=inflations,
+            annual_bond_yields=bond_yields,
+            initial_monthly_wd=target_monthly_nom_at_N,
+            n_years=decum_horizon,
+            withdrawal_strategy="fixed",
+            bond_tax_rate=btr,
+            pension_monthly=cfg_year.mc_decumulation_pension_monthly,
+            pension_start_year=cfg_year.mc_decumulation_pension_start_year,
+            pension_adjustment_rate=cfg_year.mc_decumulation_pension_adjustment_rate,
+            stock_pct_end=cfg_year.mc_decumulation_glide_end_pct,
+            glide_years=cfg_year.mc_decumulation_glide_years,
+            effective_stock_tax_rate=eff_stock_tax,
+            return_final_portfolios=True,
+        )
+        sa = 1.0 - current_bonds
+
+        def _real_finals_at(monthly_wd_nom: float) -> tuple[np.ndarray, float]:
+            local_kw = dict(loop_common)
+            local_kw["initial_monthly_wd"] = monthly_wd_nom
+            res = _run_decum_loop(
+                annual_stock_returns=stock_returns,
+                initial_stock_v=np.full(n_simulations, projected_nominal * sa),
+                initial_bond_v=np.full(n_simulations, projected_nominal * (1.0 - sa)),
+                **local_kw,
+            )
+            return np.asarray(res.final_portfolios) / cum_inf_final, res.survival_rate
+
+        # At the target withdrawal: P50 / P5 and survival.
+        finals_target, survival_target = _real_finals_at(target_monthly_nom_at_N)
+        p50_real = float(np.percentile(finals_target, 50))
+        p5_real = float(np.percentile(finals_target, 5))
+        # Real final ratios use the projected at retirement (retirement-day €).
+        # That matches how we report at the top of the Takeaway.
+        p50_ratio = p50_real / projected_nominal if projected_nominal > 0 else 0.0
+        p5_ratio = p5_real / projected_nominal if projected_nominal > 0 else 0.0
+
+        # Max sustainable real WD (today's €) for P(preserve ≥X) ≥ confidence.
+        def _preserve_p(monthly_wd_nom: float) -> float:
+            finals, _ = _real_finals_at(monthly_wd_nom)
+            return float(np.mean(finals >= preserve_ratio * projected_nominal))
+
+        lo_w = 0.0
+        hi_w = max(target_monthly_nom_at_N * 5.0, 100.0)
+        if _preserve_p(hi_w) >= confidence:
+            max_monthly_nom = hi_w
+        else:
+            for _ in range(35):
+                if hi_w - lo_w < 1.0:
+                    break
+                mid = 0.5 * (lo_w + hi_w)
+                if _preserve_p(mid) >= confidence:
+                    lo_w = mid
+                else:
+                    hi_w = mid
+            max_monthly_nom = lo_w
+        max_monthly_today = max_monthly_nom / infl_accum if infl_accum > 0 else 0.0
+
+        real_wd_rate = real_annual_target / projected_today if projected_today > 0 else 0.0
+        max_safe_wr = (max_monthly_today * 12.0) / projected_today if projected_today > 0 else 0.0
+
+        # Stock-only gain at MC P50: median final stock value vs nominal money
+        # invested in stocks (initial stock value + cumulative monthly contributions
+        # over N years, grown at annual_contribution_growth). Nominal — same basis
+        # as the accum-takeaway stock-gain line.
+        p50_stock_nom = float(np.percentile(accum_stock_by_year_nominal[N], 50))
+        invested_stock_nom = config.current_stock_value
+        for y in range(N):
+            invested_stock_nom += monthly_stock_contribution * 12.0 * (1.0 + annual_contrib_growth) ** y
+        p50_stock_gain_pct = (
+            (p50_stock_nom - invested_stock_nom) / invested_stock_nom
+            if invested_stock_nom > 0 else 0.0
+        )
+        p50_stock_gain_eur = p50_stock_nom - invested_stock_nom
+
+        # Decrement after a FIXED 30-year decum window — apples-to-apples across rows.
+        # Each row's natural decum_horizon varies (50y at N=5, 25y at N=30); a fixed 30y
+        # window lets the user compare "how much real wealth did 30y of decum cost?".
+        DECREMENT_HORIZON_YEARS = 30
+        rng_dec = np.random.default_rng(seed + N + 100_000)
+        sr30, infl30, by30 = _generate_mc_returns(
+            rng_dec, n_simulations, DECREMENT_HORIZON_YEARS,
+            cfg_year.planning_cagr, cfg_year.mc_stock_return_std_percent / 100,
+            cfg_year.expected_inflation_percent / 100, cfg_year.mc_inflation_std_percent / 100,
+            cfg_year.yield_bonds / 100, cfg_year.mc_bond_yield_std_percent / 100,
+            inflation_ar1_phi=cfg_year.mc_inflation_ar1_phi,
+            stock_return_df=cfg_year.mc_stock_return_df,
+            stock_bond_corr=cfg_year.mc_stock_bond_correlation,
+            stock_return_ar1_phi=cfg_year.mc_stock_return_ar1_phi,
+            stock_mean_uncertainty=cfg_year.mc_stock_mean_uncertainty,
+            stock_vol_uncertainty=cfg_year.mc_stock_vol_uncertainty,
+        )
+        cum_inf_30 = np.prod(1.0 + infl30, axis=1)
+        res_30 = _run_decum_loop(
+            annual_stock_returns=sr30,
+            annual_inflations=infl30,
+            annual_bond_yields=by30,
+            initial_stock_v=np.full(n_simulations, projected_nominal * sa),
+            initial_bond_v=np.full(n_simulations, projected_nominal * (1.0 - sa)),
+            initial_monthly_wd=target_monthly_nom_at_N,
+            n_years=DECREMENT_HORIZON_YEARS,
+            withdrawal_strategy="fixed",
+            bond_tax_rate=btr,
+            pension_monthly=cfg_year.mc_decumulation_pension_monthly,
+            pension_start_year=cfg_year.mc_decumulation_pension_start_year,
+            pension_adjustment_rate=cfg_year.mc_decumulation_pension_adjustment_rate,
+            stock_pct_end=cfg_year.mc_decumulation_glide_end_pct,
+            glide_years=cfg_year.mc_decumulation_glide_years,
+            effective_stock_tax_rate=eff_stock_tax,
+            return_final_portfolios=True,
+        )
+        # finals_30 in retirement-day €; further deflate by infl_accum to get today's €.
+        finals_30_at_retirement_eur = np.asarray(res_30.final_portfolios) / cum_inf_30
+        p50_final_30_today = float(np.percentile(finals_30_at_retirement_eur, 50)) / infl_accum
+        decrement_30y_today_eur = projected_today - p50_final_30_today
+
+        rows.append(YearsToRetirementRow(
+            years_to_retirement=N,
+            decum_horizon_years=decum_horizon,
+            projected_portfolio_today_eur=projected_today,
+            projected_portfolio_nominal=projected_nominal,
+            first_year_monthly_wd_nominal=target_monthly_nom_at_N,
+            real_withdrawal_rate=real_wd_rate,
+            max_safe_monthly_today_eur=max_monthly_today,
+            max_safe_wr=max_safe_wr,
+            p50_real_final_ratio=p50_ratio,
+            p5_real_final_ratio=p5_ratio,
+            survival_at_projected=survival_target,
+            p50_stock_gain_pct=p50_stock_gain_pct,
+            p50_stock_gain_eur=p50_stock_gain_eur,
+            decrement_30y_today_eur=decrement_30y_today_eur,
+        ))
+
+    return YearsToRetirementTradeoff(
+        current_age=config.current_age,
+        lifespan_age=config.lifespan_age,
+        target_monthly_today_eur=real_monthly_target,
+        preserve_ratio=preserve_ratio,
+        confidence=confidence,
+        current_bonds_pct=current_bonds,
+        rows=rows,
+    )
+
+

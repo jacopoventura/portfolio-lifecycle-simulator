@@ -26,6 +26,7 @@ from models import (
     ProjectionYieldScenarioResult,
     ScenarioResult,
     SensitivityWaterfallResult,
+    VerdictInputs,
     YearsToTargetsResult,
 )
 from monte_carlo import (
@@ -297,13 +298,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--cagr", default=None,
                         help="override stock CAGR for projection / MC planning "
                              "(accepts 4, 4.0, 0.04, '4%%'); per-run only")
-    parser.add_argument("--target-required-portfolio", type=float, default=None,
-                        dest="target_required_portfolio",
-                        help="override the required portfolio at horizon (€). When set, "
-                             "replaces the IT income-formula required portfolio used for "
-                             "Plan-B sizing, success-rate, and contribution targeting. "
-                             "Intended to receive the canonical FI bar computed by the "
-                             "decumulation pipeline.")
     args, _ = parser.parse_known_args()
     return args
 
@@ -364,7 +358,6 @@ def _compute_all(config: Config, args: argparse.Namespace) -> ReportContext:
         if projection_result.final_stock_value > 0 else 0.0
     )
 
-    target_required_override = getattr(args, "target_required_portfolio", None)
     scenario_1_result = run_scenario(
         name="SCENARIO 1 (DE)",
         config=config,
@@ -378,7 +371,6 @@ def _compute_all(config: Config, args: argparse.Namespace) -> ReportContext:
         stock_gain_fraction=stock_gain_fraction,
         stock_teilfreistellung=config.teilfreistellung,
         annual_contribution_growth=config.annual_contribution_growth_percent / 100,
-        required_total_portfolio_override=target_required_override,
     )
     scenario_2_result = run_scenario(
         name="SCENARIO 2 (IT)",
@@ -393,7 +385,6 @@ def _compute_all(config: Config, args: argparse.Namespace) -> ReportContext:
         stock_gain_fraction=stock_gain_fraction,
         stock_teilfreistellung=1.0,
         annual_contribution_growth=config.annual_contribution_growth_percent / 100,
-        required_total_portfolio_override=target_required_override,
     )
     projected_yield_scenario_1 = calculate_projection_yield_for_scenario(
         name="SCENARIO 1 (DE)",
@@ -698,6 +689,10 @@ def _render_all(ctx: ReportContext) -> tuple[str, str, str]:
             target_success=ctx.target_success,
             future_monthly_income=ctx.future_monthly_income_value,
             target_annual_net_income=ctx.target_annual_net_income,
+            invested_stock_amount=(
+                ctx.projection_result.cost_basis_stock
+                + ctx.config.current_stock_unrealized_gain
+            ),
             years_de=ctx.years_de, years_it=ctx.years_it,
             ff_de=ctx.ff_de, ff_it=ctx.ff_it,
         )
@@ -722,7 +717,7 @@ def _print_action_plan(config_toml_text: str, verbose_report: str, clean_summary
         print(f"\n  Action plan failed: {error}")
 
 
-def main() -> tuple[float, float, float | None, int, float, str, str, str] | None:
+def main() -> tuple[float, float, float | None, int, float, str, str, str, VerdictInputs] | None:
     args = _parse_args()
     if not args.no_clear:
         clear_terminal()
@@ -748,6 +743,13 @@ def main() -> tuple[float, float, float | None, int, float, str, str, str] | Non
         _print_action_plan(config_toml_text, verbose_report, clean_summary)
 
     tail_pct_int = int(round(100 - config.mc_target_success_percent))
+    verdict_inputs = VerdictInputs(
+        config=ctx.config,
+        mc_it=ctx.mc2,
+        grids_it=ctx.grids_it,
+        opt_result_it=ctx.opt_result_2,
+        target_success=ctx.target_success,
+    )
     return (
         ctx.mc2.final_portfolio_percentiles.get(50, 0.0),
         ctx.mc2.final_portfolio_percentiles.get(tail_pct_int, 0.0),
@@ -757,6 +759,7 @@ def main() -> tuple[float, float, float | None, int, float, str, str, str] | Non
         verbose_report,
         clean_summary,
         config_toml_text,
+        verdict_inputs,
     )
 
 

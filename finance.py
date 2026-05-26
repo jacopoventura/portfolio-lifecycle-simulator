@@ -222,18 +222,9 @@ def run_scenario(
     stock_gain_fraction: float,
     stock_teilfreistellung: float = 1.0,
     annual_contribution_growth: float = 0.0,
-    required_total_portfolio_override: float | None = None,
 ) -> ScenarioResult:
-    """Build a ScenarioResult sized to a required-portfolio target.
-
-    By default the target is derived from the income formula (target_annual_net_income
-    ÷ portfolio_net_income_rate). If `required_total_portfolio_override` is supplied,
-    that value replaces the income-formula target and all dependent fields
-    (required_stock/bonds_amount, monthly contributions, generated income) are
-    recomputed against it. The override is used to inject the canonical FI bar
-    (computed by the decumulation pipeline) so Plan-B math targets preservation,
-    not just income coverage.
-    """
+    """Build a ScenarioResult sized to the income-formula required portfolio
+    (target_annual_net_income ÷ portfolio_net_income_rate)."""
     bonds_weight = config.bonds_percentage / 100
     stocks_weight = 1 - bonds_weight
     effective_stock_tax_rate = stock_gain_fraction * stock_teilfreistellung * stock_tax_rate
@@ -250,13 +241,10 @@ def run_scenario(
     if portfolio_net_income_rate <= 0:
         raise ValueError("Portfolio net income rate must be greater than 0.")
 
-    if required_total_portfolio_override is not None:
-        required_total_portfolio = float(required_total_portfolio_override)
-    else:
-        required_total_portfolio = calculate_required_total_portfolio(
-            target_annual_net_income=target_annual_net_income,
-            net_income_rate=portfolio_net_income_rate,
-        )
+    required_total_portfolio = calculate_required_total_portfolio(
+        target_annual_net_income=target_annual_net_income,
+        net_income_rate=portfolio_net_income_rate,
+    )
     required_bonds_amount = required_total_portfolio * bonds_weight
     required_stock_amount = required_total_portfolio * stocks_weight
     required_monthly_contribution = calculate_required_monthly_contribution(
@@ -313,6 +301,115 @@ def run_scenario(
         required_monthly_contribution=required_monthly_contribution,
         required_monthly_bonds_contribution=required_monthly_bonds_contribution,
     )
+
+
+def compute_it_required_portfolio(
+    config: Config,
+    *,
+    stock_expected_yield: float | None = None,
+) -> float:
+    """Canonical IT required portfolio at horizon (income-formula bar).
+
+    Single source of truth for the "expected portfolio IT" / "required portfolio
+    IT" number printed by main_portfolio_projection's §1. Equals
+    `target_annual_inflated / portfolio_net_income_rate` where the net yield
+    uses IT tax parameters (bond_tax_rate = tax_rate_bond_italy 12.5%,
+    stock_teilfreistellung = 1.0, stock_gain_fraction from the deterministic
+    projection at retirement).
+
+    This is what the IT scenario aims at — *not* what it delivers (that's
+    `compute_it_deterministic_projection`).
+    """
+    inflation_rate = config.expected_inflation_percent / 100.0
+    stock_yield = stock_expected_yield if stock_expected_yield is not None else config.planning_cagr
+    bonds_yield = config.yield_bonds / 100.0
+    withdrawal_rate = config.withdrawal_percentage_stock / 100.0
+    bonds_weight = config.bonds_percentage / 100.0
+    stocks_weight = 1.0 - bonds_weight
+
+    future_monthly_income = calculate_future_income_value(
+        income_value=config.target_monthly_retirement_income,
+        years=config.years,
+        inflation_rate=inflation_rate,
+    )
+    target_annual_net_income = future_monthly_income * 12.0
+
+    # Stock gain fraction at retirement, from the deterministic projection.
+    # Survives config.years==0 because run_projection's loop just skips.
+    projection = run_projection(config, stock_yield)
+    gain_stock = max(0.0, projection.final_stock_value - projection.cost_basis_stock)
+    stock_gain_fraction = (
+        gain_stock / projection.final_stock_value if projection.final_stock_value > 0 else 0.0
+    )
+
+    # IT portfolio_net_income_rate (mirrors run_scenario's IT branch). Inlined
+    # here so callers with config.years==0 (e.g. pillar 4's "retire today" probe)
+    # don't trip run_scenario's required-monthly-contribution divide-by-zero.
+    effective_stock_tax_rate = stock_gain_fraction * 1.0 * config.tax_rate  # IT teilfreistellung=1.0
+    portfolio_net_income_rate = (
+        bonds_weight * bonds_yield * (1.0 - config.tax_rate_bond_italy)
+        + stocks_weight * withdrawal_rate * (1.0 - effective_stock_tax_rate)
+    )
+    if portfolio_net_income_rate <= 0:
+        return float("inf")
+    return target_annual_net_income / portfolio_net_income_rate
+
+
+def compute_it_deterministic_projection(
+    config: Config,
+    *,
+    stock_expected_yield: float | None = None,
+    monthly_stock_contribution_override: float | None = None,
+    monthly_bonds_contribution_override: float | None = None,
+) -> float:
+    """Canonical deterministic projection of total wealth at retirement (IT scenario).
+
+    Single source of truth for "expected portfolio at horizon". Mirrors the
+    wealth-tracking loop in `run_projection` (monthly compounding, contribution
+    step-up, cash-above-reserve→bonds at horizon), but returns just the scalar
+    and accepts contribution overrides (used by decumulation Q2 back-solve).
+
+    When called with `stock_expected_yield=None` and no overrides, returns
+    exactly `run_projection(config, config.planning_cagr).final_portfolio_value`
+    by construction.
+    """
+    cash_interest_rate = config.interest_on_cash_pa / 100.0
+    bonds_yield = config.yield_bonds / 100.0
+    stock_yield = stock_expected_yield if stock_expected_yield is not None else config.planning_cagr
+
+    months = int(round(config.years * 12))
+    stock_m = (1 + stock_yield) ** (1 / 12) - 1
+    bond_m = (1 + bonds_yield) ** (1 / 12) - 1
+    cash_m = (1 + cash_interest_rate) ** (1 / 12) - 1
+
+    monthly_net_saving = config.annual_net_saving / 12
+    init_stock_c = (
+        monthly_stock_contribution_override
+        if monthly_stock_contribution_override is not None
+        else monthly_net_saving * config.maximum_stock_monthly_investment_pct
+    )
+    init_bonds_c = (
+        monthly_bonds_contribution_override
+        if monthly_bonds_contribution_override is not None
+        else monthly_net_saving * config.maximum_bonds_monthly_investment_pct
+    )
+    init_cash_c = max(0.0, monthly_net_saving - init_stock_c - init_bonds_c)
+
+    contribution_growth_rate = config.annual_contribution_growth_percent / 100.0
+    stock_v = float(config.current_stock_value)
+    bond_v = float(config.current_bonds_value)
+    cash_v = float(config.current_cash)
+
+    for month in range(months):
+        year = month // 12
+        g = (1 + contribution_growth_rate) ** year
+        stock_v = stock_v * (1 + stock_m) + init_stock_c * g
+        bond_v = bond_v * (1 + bond_m) + init_bonds_c * g
+        cash_v = cash_v * (1 + cash_m) + init_cash_c * g
+
+    cash_to_bonds = max(0.0, cash_v - config.cash_reserve_at_horizon)
+    remaining_cash = cash_v - cash_to_bonds
+    return stock_v + bond_v + cash_to_bonds + remaining_cash
 
 
 def run_projection(config: Config, stock_expected_yield: float) -> ProjectionResult:

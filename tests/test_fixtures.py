@@ -81,10 +81,12 @@ CHAINED_JOINT_SURVIVAL_RATE  = 0.286000
 CHAINED_ACCUM_SUCCESS_FRAC   = 0.012000
 
 # compute_canonical_fi_required_scan
-CANONICAL_REQUIRED_WEALTH    = 1_497_021.48
+# Snapshot reflects the bond model with duration risk (Fix B), yield std 1.0,
+# and fi_preservation_ratio default 0.75. Regenerated via tests/_fixture_probe.py.
+CANONICAL_REQUIRED_WEALTH    = 6_103_808.59
 CANONICAL_OPTIMAL_BONDS_PCT  = 0.80
 CANONICAL_REACHABLE          = True
-CANONICAL_WORST_STRESS_LABEL = "Forced crash (yr 1-5)"
+CANONICAL_WORST_STRESS_LABEL = "Historical 2000-2002"
 
 # compute_wealth_preservation_under_sorr
 WEALTH_SURFACE_NUM_ROWS      = 4

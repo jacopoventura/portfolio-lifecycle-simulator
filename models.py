@@ -40,8 +40,10 @@ class Config:
     mc_decumulation_pension_adjustment_rate: float = 0.0  # nominal annual pension growth (0 = fixed nominal)
     mc_decumulation_glide_end_pct: float = 0.0   # stock% at end of glide (0 = no glide)
     mc_decumulation_glide_years: int = 0          # years to complete glide (0 = no glide)
-    # Canonical FI required portfolio criteria — see config.toml documentation
-    fi_preservation_ratio: float = 0.50
+    # Preservation target — fraction of initial real wealth to keep at horizon.
+    # 0.75 = "consume the gains, preserve cost basis"; 1.0 = legacy mode.
+    # See decumulation report Q1/Q2/Q3 framing.
+    fi_preservation_ratio: float = 0.75
     fi_preservation_confidence_baseline: float = 0.95
     fi_preservation_confidence_stress: float = 0.50
     # Teilfreistellung applied during decumulation. Defaults to 1.0 (no discount: IT
@@ -58,6 +60,9 @@ class Config:
     mc_stock_return_ar1_phi: float = 0.0      # AR(1) mean reversion (negative = post-crash recovery)
     mc_stock_mean_uncertainty: float = 0.0    # prior std on stock CAGR (epistemic uncertainty)
     mc_stock_vol_uncertainty: float = 0.0     # prior std on stock volatility (epistemic uncertainty)
+    # Used by decum's Years-to-retirement tradeoff to size per-row decum horizons.
+    current_age: int = 39                     # today's age; used to label candidate retirement years
+    lifespan_age: int = 94                    # planning lifespan; decum horizon = lifespan_age - retirement_age
     # Optional CAGR override used for projection/MC planning. Stored as decimal
     # (0.04 = 4%) so the property can return it directly. None falls back to the
     # config "expected_yearly_growth_stocks_percent" baseline. Set this when the
@@ -140,6 +145,8 @@ class Config:
             mc_stock_return_ar1_phi=float(config.get("mc_stock_return_ar1_phi", 0.0)),
             mc_stock_mean_uncertainty=float(config.get("mc_stock_mean_uncertainty", 0.0)),
             mc_stock_vol_uncertainty=float(config.get("mc_stock_vol_uncertainty", 0.0)),
+            current_age=int(config.get("current_age", 39)),
+            lifespan_age=int(config.get("lifespan_age", 94)),
             # planning_cagr_override is CLI-only (per-run) — never read from config.toml
         )
 
@@ -550,6 +557,128 @@ class CanonicalFIRequiredScan:
     canonical_reachable: bool            # was the canonical bar achievable in search range?
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TARGET PORTFOLIO TERMINOLOGY — three distinct concepts, do not confuse.
+# ─────────────────────────────────────────────────────────────────────────────
+# The project tracks three different "target portfolio at retirement" numbers.
+# They answer different questions and can disagree. Use these exact labels in
+# code, comments, and printed reports.
+#
+# 1. "IT income-formula required portfolio"  (short: "IT required")
+#       finance.compute_it_required_portfolio()
+#       FocusedPreservationTable.it_required_portfolio
+#       = target_annual_inflated / IT_net_yield  (yield bar — survival anchor)
+#       Question: "How much wealth does yield need to cover spending?"
+#       For user's config: ~€2.07M.
+#       Survival 4%-rule analogue passes here; preservation often does not.
+#
+# 2. "Preservation-required portfolio"  (short: "Preservation bar")
+#       compute_focused_preservation_table().q3_required_wealth
+#       = smallest W with P(real final ≥ preserve_ratio · W) ≥ confidence,
+#         optimised over bonds_pct_grid, single-confidence baseline.
+#       Question: "How much wealth to preserve X% real at Y% confidence?"
+#       For user's config (0.65 / 0.90): ~€5.39M.
+#
+# 3. "Stress-preservation required portfolio"  (short: "Canonical FI bar")
+#       compute_canonical_fi_required_scan() → CanonicalFIRequiredScan
+#       prep_canonical_fi() in main.py threads this into accum
+#       = same as #2 PLUS a worst-SORR confidence floor (dual-confidence).
+#       Question: "Same as #2 but also robust under historic crash sequences?"
+#       For user's config: ~€6.10M (higher than #2 by the SORR margin).
+#
+# The IT scenario typically: accumulation TARGETS #3 (highest bar). At
+# retirement, the wealth funding spending is #1 (yield bar). The gap between
+# them is the preservation buffer. Decumulation reports #1 as the anchor for
+# Q1 ("does the survival bar also preserve?") and #2 as the answer to Q3
+# ("what wealth would preserve at the target confidence?").
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class FocusedPreservationTable:
+    """Decumulation summary anchored on the user's actual trajectory.
+
+    Q1: At the projected retirement wealth (deterministic AND MC P50), what is
+        P(real final ≥ preserve_ratio · projection)?
+    Q2: How much monthly contribution is required to grow the deterministic
+        projection up to the Q3 target wealth? (Accumulation lever.)
+    Q3: What's the smallest starting wealth W where P(real final ≥
+        preserve_ratio · W) ≥ confidence at the best allocation?
+        (Target-wealth lever.)
+    """
+    horizon_years: int
+    target_monthly_withdrawal: float        # nominal monthly target at retirement
+    confidence: float                       # e.g. 0.95
+    preserve_ratio: float                   # X (e.g. 0.75)
+    current_bonds_pct: float                # decimal
+
+    # Q1 — primary anchor (the IT income-formula bar — what the plan AIMS at)
+    # plus a secondary anchor (the deterministic projection — what the plan
+    # DELIVERS under the planning CAGR). Both reported.
+    it_required_portfolio: float            # = compute_it_required_portfolio(config)
+    it_projected_portfolio: float           # = compute_it_deterministic_projection(config)
+    q1_p_at_it_required: float              # P(real final ≥ X·it_req) at it_req, current alloc
+    q1_p_at_it_projected: float             # P(real final ≥ X·it_proj) at it_proj, current alloc
+
+    # Q2 — contribution lever
+    current_monthly_contribution: float     # baseline (stocks + bonds)
+    q2_required_contribution: float         # smallest contribution where projected ≥ q3_required_wealth
+    q2_reachable: bool                      # False if even huge contributions don't reach Q3 target in horizon_years
+
+    # Q3 — target-wealth lever (single preserve_ratio row)
+    q3_required_wealth: float               # smallest W with P(preserve ≥X) ≥ confidence at best alloc
+    q3_best_bonds_pct: float
+    q3_reachable: bool
+    bonds_pct_grid: list[float]
+
+    # Diagnostics (anchored on the IT required portfolio — the plan's target)
+    survival_at_it_required: float          # P(balance > 0 throughout) at it_req — 4%-rule analogue
+    real_withdrawal_rate: float             # real annual wd / it_required (today's €) — compares to 4% rule
+    real_monthly_withdrawal: float          # real monthly wd at retirement (today's €) — = target_monthly_retirement_income
+    p50_real_final_at_it_required: float    # median real final wealth as % of it_required
+    p5_real_final_at_it_required: float     # 5th-percentile real final wealth as % of it_required (downside)
+    # Max sustainable real withdrawal at it_required + current allocation
+    # such that P(real_final ≥ preserve_ratio · it_req) ≥ confidence. Back-solved.
+    max_sustainable_real_wd_rate: float          # as % of it_required (today's €)
+    max_sustainable_monthly_withdrawal: float    # real €/mo (today's €)
+
+
+
+
+@dataclass
+class YearsToRetirementRow:
+    """One row of the years-to-retirement tradeoff table."""
+    years_to_retirement: int
+    decum_horizon_years: int                  # = lifespan_age - (current_age + years_to_retirement)
+    projected_portfolio_today_eur: float      # IT projected portfolio at this horizon, in today's €
+    projected_portfolio_nominal: float        # same, nominal at retirement
+    first_year_monthly_wd_nominal: float      # nominal €/mo withdrawn in year 1 of decum (= target_today × inflation^N)
+    real_withdrawal_rate: float               # = target_annual_today / projected_today (today's €)
+    max_safe_monthly_today_eur: float         # max real €/mo (today's €) for P(preserve ≥X) ≥ confidence
+    max_safe_wr: float                        # max_safe_monthly_today × 12 / projected_today
+    p50_real_final_ratio: float               # median real final wealth as fraction of projection (at the target WR)
+    p5_real_final_ratio: float                # 5th-percentile real final wealth as fraction of projection
+    survival_at_projected: float              # P(balance > 0 throughout) at projected portfolio
+    p50_stock_gain_pct: float = 0.0           # (P50 nominal stock @ year N − invested) / invested. Nominal.
+    p50_stock_gain_eur: float = 0.0           # P50 nominal stock @ year N − invested. Nominal €.
+    decrement_30y_today_eur: float = 0.0      # P50 Portfolio today − P50 wealth after 30y decum (today's €).
+
+
+@dataclass
+class YearsToRetirementTradeoff:
+    """Sensitivity of preservation outcomes to retirement-year choice. Rows
+    vary years-to-retirement; each row uses the projected portfolio that
+    accumulation would deliver at that horizon, then runs the decum MC.
+    """
+    current_age: int
+    lifespan_age: int
+    target_monthly_today_eur: float           # = config.target_monthly_retirement_income
+    preserve_ratio: float
+    confidence: float
+    current_bonds_pct: float
+    rows: list[YearsToRetirementRow]
+
+
 @dataclass
 class PlanVerdictSummary:
     """Typed values from main_cagr_analysis Plan Verdict block — used by Plan Snapshot."""
@@ -574,10 +703,29 @@ class CagrRealismSnapshot:
 
 @dataclass
 class DecumulationSummary:
-    """Typed values from main_decumulation — used by Plan Snapshot."""
-    required_portfolio_fi_canonical: float   # canonical FI bar (preservation-calibrated); see fi_preservation_* config
-    target_monthly_withdrawal: float         # nominal monthly withdrawal at horizon
-    n_years: int                              # decumulation horizon
-    survival_fixed_final: float              # final-year survival, fixed-withdrawal strategy
-    survival_gk_final: float                 # final-year survival, Guyton-Klinger strategy
-    joint_survival_chained: float            # chained accum→decum joint probability
+    """Typed values from main_decumulation — cached for --from agent re-runs.
+
+    Survival/chained fields are Optional because the focused pipeline no longer
+    computes them (the user-facing question is real-€ preservation, not survival).
+    """
+    required_portfolio_fi_canonical: float        # canonical preservation-required wealth
+    target_monthly_withdrawal: float              # nominal monthly withdrawal at horizon
+    n_years: int                                  # decumulation horizon
+    survival_fixed_final: float | None = None    # final-year survival, fixed (None when not computed)
+    survival_gk_final: float | None = None       # final-year survival, GK (None when not computed)
+    joint_survival_chained: float | None = None  # chained accum→decum joint P (None when not computed)
+    # Years-to-retirement tradeoff: first row where Max safe WD ≥ target spend.
+    # Used by the final verdict (Lever B: extend horizon, no extra saving needed).
+    tradeoff_first_safe_year_from_now: int | None = None
+    tradeoff_first_safe_wd_today: float | None = None
+
+
+@dataclass
+class VerdictInputs:
+    """Bundle of accum-side inputs needed by `print_final_verdict`. Built in
+    main_portfolio_projection.main() from the local ReportContext."""
+    config: "Config"
+    mc_it: "MonteCarloResult"             # for income success rate at current allocation
+    grids_it: "list[ContributionCagrGrid]"  # for Lever A: min total income split
+    opt_result_it: "OptimalAllocationResult"  # for Lever C: cash redeployment
+    target_success: float
