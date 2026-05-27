@@ -598,14 +598,42 @@ def print_takeaway(
     print()
 
 
+def _identify_primary_lever(
+    accum_ok: bool,
+    preserve_ok: bool | None,
+    cagr_ok: bool | None,
+    decum_summary: DecumulationSummary | None,
+    horizon: int,
+    target_today: float,
+) -> str | None:
+    if not accum_ok and preserve_ok is False:
+        if (decum_summary is not None
+                and decum_summary.tradeoff_first_safe_year_from_now is not None
+                and decum_summary.tradeoff_first_safe_year_from_now <= horizon + 5):
+            extra = decum_summary.tradeoff_first_safe_year_from_now - horizon
+            return f"extend horizon +{extra}y (closes both accumulation and preservation gaps)"
+        return "raise monthly saving (Lever A) — biggest impact on income success"
+    if not accum_ok:
+        return "raise monthly saving (Lever A) — income success below target"
+    if preserve_ok is False:
+        if (decum_summary is not None
+                and decum_summary.tradeoff_first_safe_year_from_now is not None):
+            extra = decum_summary.tradeoff_first_safe_year_from_now - horizon
+            return f"extend horizon +{extra}y (Lever B) — preservation requires more time"
+        return "reduce target spend or extend horizon — preservation gap too wide at current plan"
+    if cagr_ok is False:
+        return "re-run with --cagr at the CAPE-implied rate to see if the plan still holds"
+    return None
+
+
 def print_final_verdict(
     verdict: VerdictInputs,
     decum_summary: DecumulationSummary | None,
     realism: CagrRealismSnapshot | None,
 ) -> None:
-    """Consolidated end-of-run verdict: status, current allocation, two or three
-    levers to close the gap, and a model-risk watch line. Pulls from data already
-    computed by accum + decum + cagr — no new MC."""
+    """Consolidated end-of-run verdict: cross-pillar status dashboard, primary
+    gap/lever one-liner, then detailed levers and watch line. Pulls from data
+    already computed by accum + decum + cagr — no new MC."""
     config = verdict.config
     mc = verdict.mc_it
     target_success = verdict.target_success
@@ -618,7 +646,7 @@ def print_final_verdict(
     target_today = config.target_monthly_retirement_income
     horizon = int(round(config.years))
     income_p = mc.success_rate_income_only
-    on_track = income_p >= target_success
+    accum_ok = income_p >= target_success
 
     print()
     print("─" * 80)
@@ -627,19 +655,70 @@ def print_final_verdict(
     print(f"  Scope: IT scenario · {horizon}y horizon · target €{format_currency(target_today)}/mo today's €")
     print()
 
-    if on_track:
-        print(f"  ✓ ON TRACK — income success {income_p * 100:.1f}% ≥ {target_pct}% target")
-        print(f"    at current allocation: stocks €{format_currency(cur_stocks)} + "
+    # ── Cross-pillar status dashboard ────────────────────────────────────────
+    accum_mark = "✓" if accum_ok else "✗"
+    print(f"  {accum_mark} Accumulation   : income success {income_p * 100:.1f}% "
+          f"(need {target_pct}%)")
+
+    preserve_ok: bool | None = None
+    if decum_summary is not None:
+        safe_wd = decum_summary.tradeoff_first_safe_wd_today
+        safe_yr = decum_summary.tradeoff_first_safe_year_from_now
+        if safe_yr is not None and safe_yr <= horizon:
+            preserve_ok = True
+            print(f"  ✓ Preservation   : max safe WD €{format_currency(safe_wd or 0)}/mo "
+                  f"≥ €{format_currency(target_today)} target at {horizon}y")
+        else:
+            preserve_ok = False
+            extra = f"first safe at ~{safe_yr}y" if safe_yr is not None else "not within window"
+            print(f"  ✗ Preservation   : target spend not preserved at {horizon}y ({extra})")
+    else:
+        print(f"  - Preservation   : not computed (decumulation skipped)")
+
+    planning = config.planning_cagr
+    cagr_ok: bool | None = None
+    if realism is not None and realism.cape_nominal_cagr is not None:
+        cape = realism.cape_nominal_cagr
+        delta_pp = (planning - cape) * 100
+        if delta_pp > 2.0:
+            cagr_ok = False
+            print(f"  ✗ CAGR realism   : planning {planning * 100:.1f}% > CAPE-implied "
+                  f"{cape * 100:.1f}% (+{delta_pp:.1f}pp gap)")
+        else:
+            cagr_ok = True
+            label = "conservative" if delta_pp < -2.0 else "aligned"
+            print(f"  ✓ CAGR realism   : planning {planning * 100:.1f}% vs CAPE-implied "
+                  f"{cape * 100:.1f}% ({label})")
+    else:
+        print(f"  - CAGR realism   : not available (CAPE data missing)")
+
+    print()
+
+    # ── One-liner: overall status + primary gap + primary lever ───────────────
+    all_ok = accum_ok and preserve_ok is True and cagr_ok is not False
+    if all_ok:
+        print(f"  VERDICT: ON TRACK — all three pillars pass at current plan.")
+        print(f"    allocation: stocks €{format_currency(cur_stocks)} + "
               f"bonds €{format_currency(cur_bonds)} = €{format_currency(cur_total)}/mo")
         _verdict_watch(config, realism)
         print()
         return
 
-    # Off-track: print why + levers.
-    print(f"  ✗ NOT ON TRACK at current allocation:")
-    print(f"      stocks €{format_currency(cur_stocks)} + bonds €{format_currency(cur_bonds)} "
-          f"= €{format_currency(cur_total)}/mo")
-    print(f"      → income success {income_p * 100:.1f}% (need {target_pct}%)")
+    gaps: list[str] = []
+    if not accum_ok:
+        gaps.append(f"income success {income_p * 100:.0f}% < {target_pct}%")
+    if preserve_ok is False:
+        gaps.append("preservation gap at target horizon")
+    if cagr_ok is False and realism is not None and realism.cape_nominal_cagr is not None:
+        gaps.append(f"CAGR assumption +{(planning - realism.cape_nominal_cagr) * 100:.0f}pp above CAPE")
+    gap_str = "; ".join(gaps)
+    print(f"  VERDICT: NOT ON TRACK — {gap_str}")
+
+    primary_lever = _identify_primary_lever(
+        accum_ok, preserve_ok, cagr_ok, decum_summary, horizon, target_today,
+    )
+    if primary_lever:
+        print(f"  Primary lever: {primary_lever}")
     print()
 
     # Lever A — raise saving at fixed-CAGR min split.
