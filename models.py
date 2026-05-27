@@ -60,6 +60,9 @@ class Config:
     mc_stock_return_ar1_phi: float = 0.0      # AR(1) mean reversion (negative = post-crash recovery)
     mc_stock_mean_uncertainty: float = 0.0    # prior std on stock CAGR (epistemic uncertainty)
     mc_stock_vol_uncertainty: float = 0.0     # prior std on stock volatility (epistemic uncertainty)
+    mc_return_method: str = "parametric"      # "parametric" | "bootstrap"
+    mc_bootstrap_block_size: int = 5          # contiguous years per block (circular block bootstrap)
+    mc_bootstrap_mean_shift: bool = True      # shift bootstrapped mean to match planning CAGR
     # Used by decum's Years-to-retirement tradeoff to size per-row decum horizons.
     current_age: int = 39                     # today's age; used to label candidate retirement years
     lifespan_age: int = 94                    # planning lifespan; decum horizon = lifespan_age - retirement_age
@@ -145,6 +148,9 @@ class Config:
             mc_stock_return_ar1_phi=float(config.get("mc_stock_return_ar1_phi", 0.0)),
             mc_stock_mean_uncertainty=float(config.get("mc_stock_mean_uncertainty", 0.0)),
             mc_stock_vol_uncertainty=float(config.get("mc_stock_vol_uncertainty", 0.0)),
+            mc_return_method=str(config.get("mc_return_method", "parametric")),
+            mc_bootstrap_block_size=int(config.get("mc_bootstrap_block_size", 5)),
+            mc_bootstrap_mean_shift=bool(config.get("mc_bootstrap_mean_shift", True)),
             current_age=int(config.get("current_age", 39)),
             lifespan_age=int(config.get("lifespan_age", 94)),
             # planning_cagr_override is CLI-only (per-run) — never read from config.toml

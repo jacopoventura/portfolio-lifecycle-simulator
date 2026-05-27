@@ -110,7 +110,19 @@ The **report is preservation-led**; survival rates are footnoted, not headlined.
 
 The MC return generator (`monte_carlo._generate_mc_returns`) draws **annual** stock returns, inflation, and bond yields with the following structure:
 
-### Returns
+### Return generation methods
+
+The engine supports two stock return generation methods, selected by `mc_return_method`:
+
+**Parametric** (`"parametric"`, default): Student-t distributed with `df = mc_stock_return_df` (config: 5.0 → fat tails). Mean = `planning_cagr` (or override). Std = `mc_stock_return_std_percent / 100`. Includes AR(1) mean reversion, Cholesky stock-bond correlation, and epistemic parameter uncertainty. Best for: exploring "worse than history" tail scenarios, sensitivity analysis with clean parameter control.
+
+**Block bootstrap** (`"bootstrap"`): Circular block bootstrap from 99 years of spliced S&P 500 annual returns (SPY total return 1993–2026 + ^GSPC price-only 1928–1992 with a constant dividend adjustment from the overlap period). Draws contiguous blocks of `mc_bootstrap_block_size` years (default 5, capturing business-cycle persistence), wrapping at the array boundary. When `mc_bootstrap_mean_shift = true` (default), all bootstrapped returns are shifted by a constant so the sample mean matches `planning_cagr`, preserving variance/skewness/kurtosis/autocorrelation while targeting the user's assumed return level. Best for: realistic crash clustering, volatility regimes, and fat tails derived from actual market history rather than parametric assumptions.
+
+Both methods produce identical output: `(stock_returns, inflations, bond_yields)` as three `(n_simulations, years)` arrays. All downstream code (decumulation loops, SORR patching, grids) works identically regardless of method.
+
+**Bonds and inflation are always parametric** in both modes — no historical CPI or bond yield series are bootstrapped.
+
+### Returns (parametric mode)
 
 - **Stocks**: Student-t distributed with `df = mc_stock_return_df` (config: 5.0 → fat tails). Mean = `planning_cagr` (or override). Std = `mc_stock_return_std_percent / 100`.
 - **Bonds**: Normal. Mean = `yield_bonds / 100`. Std = `mc_bond_yield_std_percent / 100`.
@@ -325,6 +337,14 @@ If a number sounds reassuring (high preservation P, comfortable surplus), look a
 | `mc_stock_mean_uncertainty` | 0.015 | Std of normal prior on CAGR (epistemic uncertainty). |
 | `mc_stock_vol_uncertainty` | 0.03 | Std of normal prior on vol (epistemic uncertainty). |
 | `mc_inflation_ar1_phi` | 0.6 | Inflation autocorrelation. 0 = i.i.d. CPI. |
+
+### Block bootstrap
+
+| Param | Default | Effect |
+|---|---|---|
+| `mc_return_method` | `"parametric"` | `"parametric"` or `"bootstrap"`. Selects stock return generation method. |
+| `mc_bootstrap_block_size` | 5 | Contiguous years per block. 5 captures business-cycle persistence. |
+| `mc_bootstrap_mean_shift` | `true` | Shift bootstrapped mean to match `planning_cagr`. Preserves distribution shape. |
 
 ### CAGR / ETF (`[etf_optimizer]` block)
 

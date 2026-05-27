@@ -5,6 +5,7 @@ from typing import NamedTuple
 
 import numpy as np
 
+from bootstrap import block_bootstrap_returns, load_bootstrap_annual_returns
 from finance import (
     cash_converted_to_bonds_at_horizon,
     calculate_required_monthly_contribution,
@@ -63,6 +64,23 @@ _COMBINED_GRID_STOCK_STEP = 500.0
 _COMBINED_GRID_BOND_STEP = 500.0
 
 
+_VALID_RETURN_METHODS = {"parametric", "bootstrap"}
+
+
+def _get_bootstrap_returns(config: Config) -> np.ndarray | None:
+    """Return the cached 1-D historical annual returns array when bootstrap
+    mode is active, or None for parametric mode."""
+    method = config.mc_return_method
+    if method not in _VALID_RETURN_METHODS:
+        raise ValueError(
+            f"mc_return_method={method!r} is not valid. "
+            f"Expected one of: {', '.join(sorted(_VALID_RETURN_METHODS))}"
+        )
+    if method != "bootstrap":
+        return None
+    return load_bootstrap_annual_returns()
+
+
 def _generate_mc_returns(
     rng: np.random.Generator,
     n_simulations: int,
@@ -79,56 +97,66 @@ def _generate_mc_returns(
     stock_return_ar1_phi: float = 0.0,
     stock_mean_uncertainty: float = 0.0,
     stock_vol_uncertainty: float = 0.0,
+    bootstrap_annual_returns: np.ndarray | None = None,
+    bootstrap_block_size: int = 5,
+    bootstrap_mean_shift: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     shape = (n_simulations, years)
 
-    # AR(1) mean reversion in z-space: z_t = φ·z_{t-1} + √(1−φ²)·ε_t
-    # Marginal distribution of each z_t remains N(0,1), so t-transform is still exact.
-    if abs(stock_return_ar1_phi) > 1e-9:
-        innovation_scale = np.sqrt(max(1.0 - stock_return_ar1_phi ** 2, 0.0))
-        z_innovations = rng.standard_normal(shape)
-        z_stock = np.empty(shape)
-        z_prev = np.zeros(n_simulations)
-        for t in range(years):
-            z_stock[:, t] = stock_return_ar1_phi * z_prev + innovation_scale * z_innovations[:, t]
-            z_prev = z_stock[:, t]
+    # ── Stock returns: bootstrap or parametric ───────────────────────────────
+    if bootstrap_annual_returns is not None:
+        stock_returns = block_bootstrap_returns(
+            rng, bootstrap_annual_returns, n_simulations, years,
+            block_size=bootstrap_block_size,
+            target_mean=stock_mean if bootstrap_mean_shift else None,
+        )
     else:
-        z_stock = rng.standard_normal(shape)
+        # AR(1) mean reversion in z-space: z_t = φ·z_{t-1} + √(1−φ²)·ε_t
+        # Marginal distribution of each z_t remains N(0,1), so t-transform is still exact.
+        if abs(stock_return_ar1_phi) > 1e-9:
+            innovation_scale = np.sqrt(max(1.0 - stock_return_ar1_phi ** 2, 0.0))
+            z_innovations = rng.standard_normal(shape)
+            z_stock = np.empty(shape)
+            z_prev = np.zeros(n_simulations)
+            for t in range(years):
+                z_stock[:, t] = stock_return_ar1_phi * z_prev + innovation_scale * z_innovations[:, t]
+                z_prev = z_stock[:, t]
+        else:
+            z_stock = rng.standard_normal(shape)
 
-    # Cholesky stock/bond correlation
-    z_bond_raw = rng.standard_normal(shape)
-    if abs(stock_bond_corr) > 1e-9:
-        z_bond = stock_bond_corr * z_stock + np.sqrt(1.0 - stock_bond_corr ** 2) * z_bond_raw
-    else:
-        z_bond = z_bond_raw
+        # Cholesky stock/bond correlation (parametric path only — bootstrap
+        # stocks are already empirically correlated with bonds via history)
+        z_bond_raw = rng.standard_normal(shape)
+        if abs(stock_bond_corr) > 1e-9:
+            z_bond = stock_bond_corr * z_stock + np.sqrt(1.0 - stock_bond_corr ** 2) * z_bond_raw
+        else:
+            z_bond = z_bond_raw
 
-    # Parameter uncertainty: each simulation draws its own μ and σ from a prior.
-    # Models epistemic uncertainty — we don't know the true long-run CAGR or volatility.
-    if stock_mean_uncertainty > 1e-9:
-        eff_mean = rng.normal(stock_mean, stock_mean_uncertainty, (n_simulations, 1))
-    else:
-        eff_mean = stock_mean
-    if stock_vol_uncertainty > 1e-9:
-        eff_std = np.maximum(rng.normal(stock_std, stock_vol_uncertainty, (n_simulations, 1)), 0.01)
-    else:
-        eff_std = stock_std
+        # Parameter uncertainty: each simulation draws its own μ and σ from a prior.
+        if stock_mean_uncertainty > 1e-9:
+            eff_mean = rng.normal(stock_mean, stock_mean_uncertainty, (n_simulations, 1))
+        else:
+            eff_mean = stock_mean
+        if stock_vol_uncertainty > 1e-9:
+            eff_std = np.maximum(rng.normal(stock_std, stock_vol_uncertainty, (n_simulations, 1)), 0.01)
+        else:
+            eff_std = stock_std
 
-    # Student-t fat tails for stocks when df < 100 (preserves target std)
-    if stock_return_df < 100.0:
-        df = stock_return_df
-        chi2 = rng.chisquare(df, shape) / df
-        t_draw = z_stock / np.sqrt(chi2)
-        stock_returns = eff_mean + t_draw * eff_std * np.sqrt((df - 2.0) / df)
-    else:
-        stock_returns = eff_mean + z_stock * eff_std
-    stock_returns = np.maximum(stock_returns, -0.99)
+        # Student-t fat tails for stocks when df < 100 (preserves target std)
+        if stock_return_df < 100.0:
+            df = stock_return_df
+            chi2 = rng.chisquare(df, shape) / df
+            t_draw = z_stock / np.sqrt(chi2)
+            stock_returns = eff_mean + t_draw * eff_std * np.sqrt((df - 2.0) / df)
+        else:
+            stock_returns = eff_mean + z_stock * eff_std
+        stock_returns = np.maximum(stock_returns, -0.99)
 
-    # Inflation — independent of stock/bond correlation
+    # ── Inflation — always parametric ────────────────────────────────────────
     if inflation_ar1_phi == 0.0:
         inflations = rng.normal(inflation_mean, inflation_std, shape)
     else:
         # AR(1): inflation_t = μ + φ·(inflation_{t-1} − μ) + ε_t
-        # innovation_std keeps marginal variance = inflation_std²
         innovation_std = inflation_std * np.sqrt(1 - inflation_ar1_phi ** 2)
         inflations = np.empty(shape)
         prev = np.full(n_simulations, inflation_mean)
@@ -138,7 +166,9 @@ def _generate_mc_returns(
             prev = inflations[:, t]
     inflations = np.where(inflations < 0, inflations / 2, inflations)
 
-    # Bond yields from correlated z-scores
+    # ── Bond yields — always parametric ──────────────────────────────────────
+    if bootstrap_annual_returns is not None:
+        z_bond = rng.standard_normal(shape)
     bond_yields = np.maximum(bonds_yield + z_bond * bond_std, -0.5)
     return stock_returns, inflations, bond_yields
 
@@ -185,6 +215,7 @@ def _setup_mc(
     annual_growth = config.annual_contribution_growth_percent / 100
 
     rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
     annual_stock_returns, annual_inflations, annual_bond_yields = _generate_mc_returns(
         rng, n_simulations, n_years,
         stock_mean, stock_std,
@@ -196,6 +227,9 @@ def _setup_mc(
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
     )
     stock_values = np.full(n_simulations, float(initial_stock))
     bond_values = np.full(n_simulations, float(initial_bonds))
@@ -1546,6 +1580,7 @@ def simulate_decumulation(
     )
 
     rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
         config.planning_cagr, ss,
@@ -1557,6 +1592,9 @@ def simulate_decumulation(
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
     )
     initial_stock_v = np.full(n, initial_portfolio * sa)
     initial_bond_v  = np.full(n, initial_portfolio * (1.0 - sa))
@@ -1641,6 +1679,7 @@ def compute_sorr_scenarios(
     n   = n_simulations if n_simulations is not None else config.mc_decumulation_n_simulations
 
     rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
         config.planning_cagr, ss,
@@ -1652,6 +1691,9 @@ def compute_sorr_scenarios(
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
     )
     initial_stock_v = np.full(n, initial_portfolio * sa)
     initial_bond_v  = np.full(n, initial_portfolio * (1.0 - sa))
@@ -1737,6 +1779,7 @@ def compute_allocation_sweep(
 
     # Generate ONE set of random draws shared across all allocations
     rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
         config.planning_cagr,
@@ -1751,6 +1794,9 @@ def compute_allocation_sweep(
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
     )
 
     wd_rate = config.withdrawal_percentage_stock / 100.0
@@ -1848,6 +1894,7 @@ def compute_chained_mc(
     bond_std_pct = config.mc_bond_yield_std_percent / 100
 
     rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
 
     # ── Phase 1: Accumulation ─────────────────────────────────────────────────
     stock_r_a, infl_r_a, bond_r_a = _generate_mc_returns(
@@ -1860,6 +1907,9 @@ def compute_chained_mc(
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
     )
 
     stock_v = np.full(n, config.current_stock_value)
@@ -1906,6 +1956,9 @@ def compute_chained_mc(
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
     )
 
     alive = np.ones(n, dtype=bool)
@@ -2000,6 +2053,7 @@ def compute_swr_sweep(
     btr = config.tax_rate_bond_italy
 
     rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
         config.planning_cagr,
@@ -2014,6 +2068,9 @@ def compute_swr_sweep(
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
     )
 
     points: list[SWRSweepPoint] = []
@@ -2087,6 +2144,7 @@ def compute_wealth_preservation_under_sorr(
     ss = config.mc_stock_return_std_percent / 100
     is_ = config.mc_inflation_std_percent / 100
     rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
         config.planning_cagr, ss,
@@ -2098,6 +2156,9 @@ def compute_wealth_preservation_under_sorr(
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
     )
 
     loop_common = dict(
@@ -2245,6 +2306,7 @@ def compute_canonical_fi_required_scan(
     ss = config.mc_stock_return_std_percent / 100
     is_ = config.mc_inflation_std_percent / 100
     rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
         config.planning_cagr, ss,
@@ -2256,6 +2318,9 @@ def compute_canonical_fi_required_scan(
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
     )
 
     loop_common = dict(
@@ -2489,6 +2554,7 @@ def compute_focused_preservation_table(
     ss = config.mc_stock_return_std_percent / 100.0
     is_ = config.mc_inflation_std_percent / 100.0
     rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
     stock_returns, inflations, bond_yields = _generate_mc_returns(
         rng, n, ny,
         config.planning_cagr, ss,
@@ -2500,6 +2566,9 @@ def compute_focused_preservation_table(
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
     )
     cum_inf_final = np.prod(1.0 + inflations, axis=1)
 
@@ -2718,6 +2787,7 @@ def _accumulation_per_year_wealth(
     bond_std_pct = config.mc_bond_yield_std_percent / 100
 
     rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
     stock_r, infl_r, bond_r = _generate_mc_returns(
         rng, n_paths, n_years, stock_mean, stock_std,
         config.expected_inflation_percent / 100, infl_std,
@@ -2728,6 +2798,9 @@ def _accumulation_per_year_wealth(
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
     )
 
     stock_v = np.full(n_paths, config.current_stock_value)
@@ -2848,6 +2921,7 @@ def compute_years_to_retirement_tradeoff(
 
         # MC draws for decum.
         rng = np.random.default_rng(seed + N)
+        _bs = _get_bootstrap_returns(cfg_year)
         stock_returns, inflations, bond_yields = _generate_mc_returns(
             rng, n_simulations, decum_horizon,
             cfg_year.planning_cagr, cfg_year.mc_stock_return_std_percent / 100,
@@ -2859,6 +2933,9 @@ def compute_years_to_retirement_tradeoff(
             stock_return_ar1_phi=cfg_year.mc_stock_return_ar1_phi,
             stock_mean_uncertainty=cfg_year.mc_stock_mean_uncertainty,
             stock_vol_uncertainty=cfg_year.mc_stock_vol_uncertainty,
+            bootstrap_annual_returns=_bs,
+            bootstrap_block_size=cfg_year.mc_bootstrap_block_size,
+            bootstrap_mean_shift=cfg_year.mc_bootstrap_mean_shift,
         )
         cum_inf_final = np.prod(1.0 + inflations, axis=1)
         loop_common = dict(
@@ -2952,6 +3029,9 @@ def compute_years_to_retirement_tradeoff(
             stock_return_ar1_phi=cfg_year.mc_stock_return_ar1_phi,
             stock_mean_uncertainty=cfg_year.mc_stock_mean_uncertainty,
             stock_vol_uncertainty=cfg_year.mc_stock_vol_uncertainty,
+            bootstrap_annual_returns=_bs,
+            bootstrap_block_size=cfg_year.mc_bootstrap_block_size,
+            bootstrap_mean_shift=cfg_year.mc_bootstrap_mean_shift,
         )
         cum_inf_30 = np.prod(1.0 + infl30, axis=1)
         res_30 = _run_decum_loop(

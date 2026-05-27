@@ -6,16 +6,15 @@ reasonable to expect. I also want to understand the risks involved, including th
 
 Where the scope is genuinely under-served:
 
-
-  2. No top-line verdict since PLAN SNAPSHOT was removed. Scope explicitly says "am I on track" — the answer is distributed across section takeaways (each ✗ marker), but
-  there's no consolidated "VERDICT: NOT ON TRACK — primary gap is X, primary lever is Y". A reader has to assemble it themselves. Three lines at end of run would close
-  this.
   3. Drift tracking (TODO 5.6) — operational gap, not financial. You run this monthly–quarterly. Without delta-vs-last-run, "did my numbers shift?" is invisible. CSV log
   exists but you'd diff manually.
-  4. Fat-tail risk modeling (TODO 4.2) is the only modeling gap that matters. Current MC is Gaussian → understates the 2008/2020-style fat tails that are the risk you
-  actually care about in decum. The Bad-luck/P5 columns are honest but they're honest about a too-thin distribution.
   5. Policy/pension risk (TODO 4.3) — Italian pension reforms every ~10y, capital gains tax revisions. Not modeled. Real tail risk for your 
      scenario.
+
+## Done
+
+  2. ~~Top-line verdict~~ — FINAL VERDICT block now shows cross-pillar dashboard (Accumulation / Preservation / CAGR realism with ✓/✗), one-liner verdict with primary gap + primary lever, then detailed levers A/B/C. (2026-05-27)
+  4. ~~Fat-tail risk modeling~~ — block bootstrap MC added (`mc_return_method = "bootstrap"`). Circular block bootstrap from 99 years of spliced S&P 500 total returns (SPY 1993+ / GSPC pre-1993 with dividend adjustment). Captures real crash clustering, volatility regimes, fat tails. Mean-shifted to planning CAGR. Parametric mode remains default. (2026-05-27)
 ## Nice to have
 
 - GUI / web frontend
