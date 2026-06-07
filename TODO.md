@@ -6,10 +6,6 @@ reasonable to expect. I also want to understand the risks involved, including th
 
 Where the scope is genuinely under-served:
 
-  3. Drift tracking (TODO 5.6) — operational gap, not financial. You run this monthly–quarterly. Without delta-vs-last-run, "did my numbers shift?" is invisible. CSV log
-  exists but you'd diff manually.
-  5. Policy/pension risk (TODO 4.3) — Italian pension reforms every ~10y, capital gains tax revisions. Not modeled. Real tail risk for your 
-     scenario.
 
 ## Done
 

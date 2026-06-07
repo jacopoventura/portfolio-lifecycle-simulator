@@ -36,6 +36,15 @@ _CONTEXT_FILE = Path("historical_data") / "last_run_context.txt"
 _HISTORY_FILE = Path("historical_data") / "run_history.csv"
 _HISTORY_HEADER = "date,required_cagr,joint_P,p50\n"
 
+_DRIFT_FILE = Path("historical_data") / "drift_history.csv"
+_DRIFT_HEADER = (
+    "month,bonds_pct,horizon_years,target_income_eur,"
+    "target_portfolio_it_eur,success_rate_it_bonds,success_rate_it_stocks,"
+    "success_rate_it_total,lever_a_monthly_stocks,lever_a_monthly_bonds\n"
+)
+# Index of "success_rate_it_total" in a CSV row (0-based).
+_DRIFT_TOTAL_COL = 7
+
 
 def _append_history(
     required_cagr: float | None,
@@ -59,6 +68,144 @@ def _append_history(
         if fresh:
             f.write(_HISTORY_HEADER)
         f.write(row)
+
+
+def _lever_a_monthly_split(verdict_inputs) -> tuple[float, float]:
+    """Recompute Lever A monthly stock + bond contributions for the IT scenario.
+    Mirrors print_final_verdict so drift tracking works even when the verdict
+    block is suppressed. Returns (stocks_per_mo, bonds_per_mo)."""
+    from reports.section2 import _find_min_total_income_split
+    from reports.summary import _closest_cagr_idx
+    config = verdict_inputs.config
+    assumed = config.expected_yearly_growth_stocks_percent / 100
+    cagr_idx = _closest_cagr_idx(verdict_inputs.grids_it[0].cagr_values, assumed)
+    stocks, bonds, _ = _find_min_total_income_split(
+        verdict_inputs.grids_it, cagr_idx, verdict_inputs.target_success,
+    )
+    return stocks, bonds
+
+
+def _append_drift_snapshot(
+    verdict_inputs,
+    accum_required_it: float,
+) -> None:
+    """Save a per-month snapshot of plan state + simulation outcome.
+
+    One row per calendar month (MM-YYYY). When the same month already has a
+    row, we overwrite it ONLY if the new IT income success rate beats what's
+    on file — so the log becomes "best snapshot so far this month" rather
+    than a noisy per-run dump."""
+    from datetime import date
+
+    config = verdict_inputs.config
+    mc = verdict_inputs.mc_it
+    a_stocks, a_bonds = _lever_a_monthly_split(verdict_inputs)
+
+    month = date.today().strftime("%m-%Y")
+    sr_total = mc.success_rate_income_only  # IT income success — the headline drift metric
+    row = (
+        f"{month},{config.bonds_percentage:.2f},{int(round(config.years))},"
+        f"{config.target_monthly_retirement_income:.2f},"
+        f"{accum_required_it:.0f},"
+        f"{mc.success_rate_bond_only:.4f},{mc.success_rate_stock_only:.4f},"
+        f"{sr_total:.4f},{a_stocks:.2f},{a_bonds:.2f}\n"
+    )
+
+    _DRIFT_FILE.parent.mkdir(exist_ok=True)
+    header = _DRIFT_HEADER
+    existing: list[str] = []
+    if _DRIFT_FILE.exists():
+        lines = _DRIFT_FILE.read_text().splitlines(keepends=True)
+        if lines:
+            header = lines[0]
+            existing = lines[1:]
+
+    keep: list[str] = []
+    replaced = False
+    month_prefix = month + ","
+    for r in existing:
+        if r.startswith(month_prefix):
+            try:
+                prev_total = float(r.split(",")[_DRIFT_TOTAL_COL])
+            except (IndexError, ValueError):
+                prev_total = -1.0
+            if sr_total <= prev_total:
+                # Existing row is at least as good — leave the file untouched.
+                return
+            replaced = True
+            continue  # drop the old row; the new one is appended below
+        keep.append(r)
+    keep.append(row)
+
+    with _DRIFT_FILE.open("w") as f:
+        f.write(header)
+        f.writelines(keep)
+
+    tag = "overwrote" if replaced else "appended"
+    print(f"  Drift snapshot {tag} for {month} "
+          f"(IT income success {sr_total * 100:.1f}%) → {_DRIFT_FILE}")
+
+
+def _plot_drift_history() -> None:
+    """Render drift_history.png from drift_history.csv: success-rate-it-total vs
+    time, with the latest snapshot's plan parameters in the title. Lazy-imports
+    matplotlib so it's only loaded when this runs; skips silently if the file
+    has only a header or matplotlib isn't installed."""
+    if not _DRIFT_FILE.exists():
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # headless write-only
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("  [!] Skipping drift plot — `pip install matplotlib` to enable.")
+        return
+    from datetime import datetime
+
+    lines = _DRIFT_FILE.read_text().splitlines()
+    if len(lines) < 2:
+        return
+    rows: list[tuple[datetime, float, int, float, float]] = []
+    for raw in lines[1:]:
+        parts = raw.split(",")
+        if len(parts) <= _DRIFT_TOTAL_COL:
+            continue
+        try:
+            dt = datetime.strptime(parts[0], "%m-%Y")
+            horizon = int(parts[2])
+            target_income = float(parts[3])
+            target_portfolio = float(parts[4])
+            total = float(parts[_DRIFT_TOTAL_COL])
+        except (ValueError, IndexError):
+            continue
+        rows.append((dt, total, horizon, target_income, target_portfolio))
+    if not rows:
+        return
+    rows.sort(key=lambda r: r[0])
+    dates = [r[0] for r in rows]
+    success_pct = [r[1] * 100 for r in rows]
+
+    # Title shows the latest snapshot's plan parameters — that's the current intent.
+    _, _, horizon, target_income, target_portfolio = rows[-1]
+
+    fig, ax = plt.subplots(figsize=(8.5, 4.5))
+    ax.plot(dates, success_pct, marker="o", linewidth=1.6, color="#1f77b4")
+    ax.set_ylim(0, 100)
+    ax.set_ylabel("IT income success rate (%)")
+    ax.set_xlabel("Month")
+    ax.grid(True, alpha=0.3)
+    fig.autofmt_xdate()
+    ax.set_title(
+        f"Portfolio drift — IT income success rate over time\n"
+        f"horizon {horizon}y · target €{target_income:,.0f}/mo · "
+        f"target portfolio €{target_portfolio:,.0f}",
+        fontsize=10,
+    )
+    out = _DRIFT_FILE.with_suffix(".png")
+    fig.tight_layout()
+    fig.savefig(out, dpi=120)
+    plt.close(fig)
+    print(f"  Drift plot saved → {out}")
 
 
 _SECTIONS = ("accum", "decum", "cagr", "agent")
@@ -390,6 +537,11 @@ def main() -> None:
     # Drift log — one row per full pipeline run
     joint_P = decum_summary.joint_survival_chained if decum_summary is not None else None
     _append_history(required_cagr=required_cagr, joint_P=joint_P, p50=p50)
+
+    # Monthly drift snapshot — keyed by MM-YYYY, kept only when success improves.
+    if verdict_inputs is not None:
+        _append_drift_snapshot(verdict_inputs, accum_required_it)
+        _plot_drift_history()
 
     # Section 4: AI Agent — only when explicitly requested
     if args.agent or args.start_from == "agent":
