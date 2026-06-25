@@ -142,8 +142,13 @@ class TestValidateConfigInputs:
 
 
 class TestValidateProjectionInputs:
-    def test_reserve_exceeds_cash_raises(self):
+    def test_reserve_exceeds_cash_clamps_to_current_cash(self):
         config = _make_config(cash_reserve_at_horizon=100_000.0)
+        validate_projection_inputs(config, 0.02)  # warns, does not raise
+        assert config.cash_reserve_at_horizon == config.current_cash
+
+    def test_negative_reserve_raises(self):
+        config = _make_config(cash_reserve_at_horizon=-1.0)
         with pytest.raises(ValueError, match="cash_reserve_at_horizon"):
             validate_projection_inputs(config, 0.02)
 

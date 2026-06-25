@@ -80,11 +80,14 @@ def validate_config_inputs(
 def validate_projection_inputs(config: Config, cash_interest_rate: float) -> None:
     if config.current_cash < 0:
         raise ValueError("current_cash must be greater than or equal to 0.")
-    if not 0 <= config.cash_reserve_at_horizon <= config.current_cash:
-        raise ValueError(
-            f"cash_reserve_at_horizon ({config.cash_reserve_at_horizon:,.0f}) must be between 0 "
-            f"and current_cash ({config.current_cash:,.0f})."
+    if config.cash_reserve_at_horizon < 0:
+        raise ValueError("cash_reserve_at_horizon must be greater than or equal to 0.")
+    if config.cash_reserve_at_horizon > config.current_cash:
+        print(
+            f"⚠ Warning: cash_reserve_at_horizon ({config.cash_reserve_at_horizon:,.0f}) exceeds "
+            f"current_cash ({config.current_cash:,.0f}); clamping to current_cash."
         )
+        config.cash_reserve_at_horizon = config.current_cash
     if config.annual_net_saving < 0:
         raise ValueError("annual_net_saving must be greater than or equal to 0.")
     if not 0 <= config.maximum_stock_monthly_investment_pct <= 1:
