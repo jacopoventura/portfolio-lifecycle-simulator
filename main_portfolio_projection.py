@@ -407,8 +407,8 @@ def _compute_all(config: Config, args: argparse.Namespace) -> ReportContext:
 
     cash_pct = max(
         0.0,
-        1.0 - config.maximum_stock_monthly_investment_pct
-        - config.maximum_bonds_monthly_investment_pct,
+        1.0 - config.stock_monthly_investment_pct
+        - config.bonds_monthly_investment_pct,
     )
     monthly_cash = config.monthly_saving * cash_pct
     cash_to_bonds_at_horizon_val = cash_converted_to_bonds_at_horizon(
@@ -423,8 +423,8 @@ def _compute_all(config: Config, args: argparse.Namespace) -> ReportContext:
 
     stock_std = config.mc_stock_return_std_percent / 100
     inflation_std = config.mc_inflation_std_percent / 100
-    current_stock_mo = config.monthly_saving * config.maximum_stock_monthly_investment_pct
-    current_bonds_mo = config.monthly_saving * config.maximum_bonds_monthly_investment_pct
+    current_stock_mo = config.monthly_saving * config.stock_monthly_investment_pct
+    current_bonds_mo = config.monthly_saving * config.bonds_monthly_investment_pct
     bonds_mo_de = scenario_1_result.required_monthly_bonds_contribution
     bonds_mo_it = scenario_2_result.required_monthly_bonds_contribution
 
@@ -749,6 +749,8 @@ def main() -> tuple[float, float, float | None, int, float, str, str, str, Verdi
         grids_it=ctx.grids_it,
         opt_result_it=ctx.opt_result_2,
         target_success=ctx.target_success,
+        sensitivity_it=ctx.sensitivity_it,
+        combined_it=ctx.combined_it,
     )
     return (
         ctx.mc2.final_portfolio_percentiles.get(50, 0.0),

@@ -11,8 +11,8 @@ class Config:
     interest_on_cash_pa: float
     annual_net_saving: float
     annual_contribution_growth_percent: float
-    maximum_stock_monthly_investment_pct: float
-    maximum_bonds_monthly_investment_pct: float
+    stock_monthly_investment_pct: float
+    bonds_monthly_investment_pct: float
     target_monthly_retirement_income: float
     years: float
     expected_inflation_percent: float
@@ -95,11 +95,11 @@ class Config:
             interest_on_cash_pa=float(config.get("interest_on_cash_pa", 0.0)),
             annual_net_saving=float(config.get("annual_net_saving", 0.0)),
             annual_contribution_growth_percent=float(config.get("annual_contribution_growth_percent", 0.0)),
-            maximum_stock_monthly_investment_pct=float(
-                config.get("maximum_stock_monthly_investment_pct", 0.0)
+            stock_monthly_investment_pct=float(
+                config.get("stock_monthly_investment_pct", 0.0)
             ),
-            maximum_bonds_monthly_investment_pct=float(
-                config.get("maximum_bonds_monthly_investment_pct", 0.0)
+            bonds_monthly_investment_pct=float(
+                config.get("bonds_monthly_investment_pct", 0.0)
             ),
             target_monthly_retirement_income=float(config["target_monthly_retirement_income"]),
             years=float(config["years"]),
@@ -227,8 +227,8 @@ class ProjectionResult:
     cash_interest_rate: float
     annual_net_saving: float
     annual_contribution_growth_percent: float
-    maximum_stock_monthly_investment_pct: float
-    maximum_bonds_monthly_investment_pct: float
+    stock_monthly_investment_pct: float
+    bonds_monthly_investment_pct: float
     initial_stock_value: float
     initial_stock_unrealized_gain: float
     initial_cash_value: float
@@ -587,16 +587,17 @@ class CanonicalFIRequiredScan:
 #
 # 3. "Stress-preservation required portfolio"  (short: "Canonical FI bar")
 #       compute_canonical_fi_required_scan() → CanonicalFIRequiredScan
-#       prep_canonical_fi() in main.py threads this into accum
+#       NOT computed by the default pipeline (removed from main.py 2026-07:
+#       nothing downstream consumed it; call it directly if the number is needed).
 #       = same as #2 PLUS a worst-SORR confidence floor (dual-confidence).
 #       Question: "Same as #2 but also robust under historic crash sequences?"
 #       For user's config: ~€6.10M (higher than #2 by the SORR margin).
 #
-# The IT scenario typically: accumulation TARGETS #3 (highest bar). At
-# retirement, the wealth funding spending is #1 (yield bar). The gap between
-# them is the preservation buffer. Decumulation reports #1 as the anchor for
-# Q1 ("does the survival bar also preserve?") and #2 as the answer to Q3
-# ("what wealth would preserve at the target confidence?").
+# The IT scenario typically: accumulation TARGETS #1 (income-formula bar;
+# see feedback 2026-05-24 — preservation lives in decum's tradeoff table).
+# Decumulation reports #1 as the anchor for Q1 ("does the survival bar also
+# preserve?") and #2 as the answer to Q3 ("what wealth would preserve at the
+# target confidence?"). #3 remains available on demand for stress framing.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -724,6 +725,9 @@ class DecumulationSummary:
     # Used by the final verdict (Lever B: extend horizon, no extra saving needed).
     tradeoff_first_safe_year_from_now: int | None = None
     tradeoff_first_safe_wd_today: float | None = None
+    # Max safe real WD (today's €) at the tradeoff row closest to the plan
+    # horizon — quantifies the preservation pillar's spending gap in plan-check.
+    max_safe_wd_at_plan_horizon_today: float | None = None
 
 
 @dataclass
@@ -735,3 +739,5 @@ class VerdictInputs:
     grids_it: "list[ContributionCagrGrid]"  # for Lever A: min total income split
     opt_result_it: "OptimalAllocationResult"  # for Lever C: cash redeployment
     target_success: float
+    sensitivity_it: "SensitivityWaterfallResult | None" = None  # for plan-check Watch line
+    combined_it: "CombinedGrid | None" = None  # for plan-check mix-risk re-split line

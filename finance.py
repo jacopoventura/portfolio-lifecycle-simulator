@@ -90,14 +90,14 @@ def validate_projection_inputs(config: Config, cash_interest_rate: float) -> Non
         config.cash_reserve_at_horizon = config.current_cash
     if config.annual_net_saving < 0:
         raise ValueError("annual_net_saving must be greater than or equal to 0.")
-    if not 0 <= config.maximum_stock_monthly_investment_pct <= 1:
-        raise ValueError("maximum_stock_monthly_investment_pct must be between 0 and 1.")
-    if not 0 <= config.maximum_bonds_monthly_investment_pct <= 1:
-        raise ValueError("maximum_bonds_monthly_investment_pct must be between 0 and 1.")
-    total_pct = config.maximum_stock_monthly_investment_pct + config.maximum_bonds_monthly_investment_pct
+    if not 0 <= config.stock_monthly_investment_pct <= 1:
+        raise ValueError("stock_monthly_investment_pct must be between 0 and 1.")
+    if not 0 <= config.bonds_monthly_investment_pct <= 1:
+        raise ValueError("bonds_monthly_investment_pct must be between 0 and 1.")
+    total_pct = config.stock_monthly_investment_pct + config.bonds_monthly_investment_pct
     if total_pct > 1.0 + 1e-9:
         raise ValueError(
-            f"maximum_stock_monthly_investment_pct + maximum_bonds_monthly_investment_pct "
+            f"stock_monthly_investment_pct + bonds_monthly_investment_pct "
             f"({total_pct:.4f}) must be <= 1.0  (remainder goes to cash)."
         )
     if cash_interest_rate <= -1:
@@ -257,7 +257,7 @@ def run_scenario(
         annual_yield=stock_expected_yield,
         annual_contribution_growth=annual_contribution_growth,
     )
-    cash_pct = max(0.0, 1.0 - config.maximum_stock_monthly_investment_pct - config.maximum_bonds_monthly_investment_pct)
+    cash_pct = max(0.0, 1.0 - config.stock_monthly_investment_pct - config.bonds_monthly_investment_pct)
     monthly_cash_contrib = config.annual_net_saving / 12 * cash_pct
     cash_to_bonds = cash_converted_to_bonds_at_horizon(
         current_cash=config.current_cash,
@@ -389,12 +389,12 @@ def compute_it_deterministic_projection(
     init_stock_c = (
         monthly_stock_contribution_override
         if monthly_stock_contribution_override is not None
-        else monthly_net_saving * config.maximum_stock_monthly_investment_pct
+        else monthly_net_saving * config.stock_monthly_investment_pct
     )
     init_bonds_c = (
         monthly_bonds_contribution_override
         if monthly_bonds_contribution_override is not None
-        else monthly_net_saving * config.maximum_bonds_monthly_investment_pct
+        else monthly_net_saving * config.bonds_monthly_investment_pct
     )
     init_cash_c = max(0.0, monthly_net_saving - init_stock_c - init_bonds_c)
 
@@ -431,8 +431,8 @@ def run_projection(config: Config, stock_expected_yield: float) -> ProjectionRes
 
     contribution_growth_rate = config.annual_contribution_growth_percent / 100
     monthly_net_saving = config.annual_net_saving / 12
-    initial_monthly_stock_contribution = monthly_net_saving * config.maximum_stock_monthly_investment_pct
-    initial_monthly_bonds_contribution = monthly_net_saving * config.maximum_bonds_monthly_investment_pct
+    initial_monthly_stock_contribution = monthly_net_saving * config.stock_monthly_investment_pct
+    initial_monthly_bonds_contribution = monthly_net_saving * config.bonds_monthly_investment_pct
     initial_monthly_cash_contribution = (
         monthly_net_saving - initial_monthly_stock_contribution - initial_monthly_bonds_contribution
     )
@@ -482,8 +482,8 @@ def run_projection(config: Config, stock_expected_yield: float) -> ProjectionRes
         cash_interest_rate=cash_interest_rate,
         annual_net_saving=config.annual_net_saving,
         annual_contribution_growth_percent=config.annual_contribution_growth_percent,
-        maximum_stock_monthly_investment_pct=config.maximum_stock_monthly_investment_pct,
-        maximum_bonds_monthly_investment_pct=config.maximum_bonds_monthly_investment_pct,
+        stock_monthly_investment_pct=config.stock_monthly_investment_pct,
+        bonds_monthly_investment_pct=config.bonds_monthly_investment_pct,
         initial_stock_value=config.current_stock_value,
         initial_stock_unrealized_gain=config.current_stock_unrealized_gain,
         initial_cash_value=config.current_cash,

@@ -825,8 +825,8 @@ def compute_optimal_allocation(
     extra_stocks_values = np.arange(0.0, available + step * 0.5, step)
     master_rng = np.random.default_rng(seed)
 
-    _cash_pct = max(0.0, 1.0 - config.maximum_stock_monthly_investment_pct
-                    - config.maximum_bonds_monthly_investment_pct)
+    _cash_pct = max(0.0, 1.0 - config.stock_monthly_investment_pct
+                    - config.bonds_monthly_investment_pct)
     monthly_cash_contrib = config.annual_net_saving / 12 * _cash_pct
     cash_rate = config.interest_on_cash_pa / 100
     contribution_growth = config.annual_contribution_growth_percent / 100
@@ -2522,11 +2522,11 @@ def compute_focused_preservation_table(
         bonds_pct_grid = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
     if monthly_stock_contribution is None:
         monthly_stock_contribution = (
-            config.annual_net_saving / 12.0 * config.maximum_stock_monthly_investment_pct
+            config.annual_net_saving / 12.0 * config.stock_monthly_investment_pct
         )
     if monthly_bond_contribution is None:
         monthly_bond_contribution = (
-            config.annual_net_saving / 12.0 * config.maximum_bonds_monthly_investment_pct
+            config.annual_net_saving / 12.0 * config.bonds_monthly_investment_pct
         )
 
     current_bonds = config.bonds_percentage / 100.0
@@ -2877,11 +2877,11 @@ def compute_years_to_retirement_tradeoff(
         confidence = config.fi_preservation_confidence_baseline
     if monthly_stock_contribution is None:
         monthly_stock_contribution = (
-            config.annual_net_saving / 12.0 * config.maximum_stock_monthly_investment_pct
+            config.annual_net_saving / 12.0 * config.stock_monthly_investment_pct
         )
     if monthly_bond_contribution is None:
         monthly_bond_contribution = (
-            config.annual_net_saving / 12.0 * config.maximum_bonds_monthly_investment_pct
+            config.annual_net_saving / 12.0 * config.bonds_monthly_investment_pct
         )
 
     current_bonds = config.bonds_percentage / 100.0

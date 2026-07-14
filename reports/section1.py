@@ -219,7 +219,7 @@ def print_sensitivity_table(
             f"| {fmt(mb2):>{col_w}} |"
         )
 
-    cash_pct = max(0.0, 1.0 - config.maximum_stock_monthly_investment_pct - config.maximum_bonds_monthly_investment_pct)
+    cash_pct = max(0.0, 1.0 - config.stock_monthly_investment_pct - config.bonds_monthly_investment_pct)
     monthly_cash_contribution = config.annual_net_saving / 12 * cash_pct
     cash_to_bonds = cash_converted_to_bonds_at_horizon(
         current_cash=config.current_cash,

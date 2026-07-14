@@ -1,12 +1,15 @@
 """
 main.py — unified retirement planning analysis
 
-Runs the full four-section pipeline in sequence:
+Computes the full pipeline silently (live progress markers only), then prints a
+verdict-first report: a self-contained RETIREMENT PLAN CHECK block (3 pillars,
+since-last-run delta, levers, three-bars legend) followed by the evidence
+sections:
 
-  1. ACCUMULATION  — what portfolio/contributions do I need to retire by 2041?
-  2. DECUMULATION  — can that portfolio survive 40 years of withdrawals?
-  3. INSTRUMENTS   — which ETFs credibly deliver the required stock return?
-  4. AI AGENT      — action plan integrating all three sections (opt-in via --agent)
+  S1. ACCUMULATION  — do I reach the income bar by the plan date?
+  S2. DECUMULATION  — does that wealth survive & preserve real value?
+  S3. INSTRUMENTS   — does the real world deliver the assumed CAGR?
+  S4. AI AGENT      — action plan integrating all sections (opt-in via --agent)
 
 Usage:
   python main.py                     # sections 1→2→3 (no AI call)
@@ -27,7 +30,7 @@ import io
 import sys
 from pathlib import Path
 
-from models import CagrRealismSnapshot, CanonicalFIRequiredScan, DecumulationSummary, PlanVerdictSummary
+from models import CagrRealismSnapshot, DecumulationSummary, PlanVerdictSummary
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -88,13 +91,13 @@ def _lever_a_monthly_split(verdict_inputs) -> tuple[float, float]:
 def _append_drift_snapshot(
     verdict_inputs,
     accum_required_it: float,
-) -> None:
+) -> str:
     """Save a per-month snapshot of plan state + simulation outcome.
 
     One row per calendar month (MM-YYYY). When the same month already has a
     row, we overwrite it ONLY if the new IT income success rate beats what's
     on file — so the log becomes "best snapshot so far this month" rather
-    than a noisy per-run dump."""
+    than a noisy per-run dump. Returns a status string for the report footer."""
     from datetime import date
 
     config = verdict_inputs.config
@@ -131,7 +134,8 @@ def _append_drift_snapshot(
                 prev_total = -1.0
             if sr_total <= prev_total:
                 # Existing row is at least as good — leave the file untouched.
-                return
+                return (f"snapshot kept — {prev_total * 100:.1f}% on file "
+                        f"beats {sr_total * 100:.1f}%")
             replaced = True
             continue  # drop the old row; the new one is appended below
         keep.append(r)
@@ -142,29 +146,28 @@ def _append_drift_snapshot(
         f.writelines(keep)
 
     tag = "overwrote" if replaced else "appended"
-    print(f"  Drift snapshot {tag} for {month} "
-          f"(IT income success {sr_total * 100:.1f}%) → {_DRIFT_FILE}")
+    return f"snapshot {tag} for {month} (income success {sr_total * 100:.1f}%)"
 
 
-def _plot_drift_history() -> None:
+def _plot_drift_history() -> str | None:
     """Render drift_history.png from drift_history.csv: success-rate-it-total vs
     time, with the latest snapshot's plan parameters in the title. Lazy-imports
     matplotlib so it's only loaded when this runs; skips silently if the file
-    has only a header or matplotlib isn't installed."""
+    has only a header or matplotlib isn't installed. Returns the written
+    filename for the report footer, or None when skipped."""
     if not _DRIFT_FILE.exists():
-        return
+        return None
     try:
         import matplotlib
         matplotlib.use("Agg")  # headless write-only
         import matplotlib.pyplot as plt
     except ImportError:
-        print("  [!] Skipping drift plot — `pip install matplotlib` to enable.")
-        return
+        return "drift plot skipped — pip install matplotlib"
     from datetime import datetime
 
     lines = _DRIFT_FILE.read_text().splitlines()
     if len(lines) < 2:
-        return
+        return None
     rows: list[tuple[datetime, float, int, float, float]] = []
     for raw in lines[1:]:
         parts = raw.split(",")
@@ -180,7 +183,7 @@ def _plot_drift_history() -> None:
             continue
         rows.append((dt, total, horizon, target_income, target_portfolio))
     if not rows:
-        return
+        return None
     rows.sort(key=lambda r: r[0])
     dates = [r[0] for r in rows]
     success_pct = [r[1] * 100 for r in rows]
@@ -205,7 +208,36 @@ def _plot_drift_history() -> None:
     fig.tight_layout()
     fig.savefig(out, dpi=120)
     plt.close(fig)
-    print(f"  Drift plot saved → {out}")
+    return out.name
+
+
+def _read_prev_drift_row() -> dict | None:
+    """Most recent drift row from a month BEFORE the current one — feeds the
+    'since last run' delta in the plan-check block. None when no history."""
+    if not _DRIFT_FILE.exists():
+        return None
+    from datetime import date, datetime
+    current_month = date.today().strftime("%m-%Y")
+    best: dict | None = None
+    best_dt: "datetime | None" = None
+    for raw in _DRIFT_FILE.read_text().splitlines()[1:]:
+        parts = raw.split(",")
+        if len(parts) <= _DRIFT_TOTAL_COL or parts[0] == current_month:
+            continue
+        try:
+            dt = datetime.strptime(parts[0], "%m-%Y")
+            row = {
+                "month": parts[0],
+                "bonds_pct": float(parts[1]),
+                "horizon": int(parts[2]),
+                "target_income": float(parts[3]),
+                "sr_total": float(parts[_DRIFT_TOTAL_COL]),
+            }
+        except (ValueError, IndexError):
+            continue
+        if best_dt is None or dt > best_dt:
+            best_dt, best = dt, row
+    return best
 
 
 _SECTIONS = ("accum", "decum", "cagr", "agent")
@@ -218,31 +250,25 @@ def _banner(n: int, title: str) -> None:
     print("─" * 80)
 
 
-class _Tee:
-    """Write to both real stdout and a capture buffer simultaneously."""
-    def __init__(self, stream, buf: io.StringIO) -> None:
-        self._stream = stream
-        self._buf = buf
-
-    def write(self, s: str) -> int:
-        self._stream.write(s)
-        self._stream.flush()
-        self._buf.write(s)
-        return len(s)
-
-    def flush(self) -> None:
-        self._stream.flush()
+def _evidence_banner(tag: str, question: str, feeds: str) -> None:
+    """Section header for the evidence half of the report: the question the
+    section answers plus which verdict pillar / lever it feeds."""
+    print()
+    print("─" * 80)
+    print(f"{tag} — {question}")
+    print(f"     feeds: {feeds}")
+    print("─" * 80)
 
 
 def _capture(fn, argv_extra: list[str] | None = None):
-    """Call fn() with a clean sys.argv, print output live, and return (text, return_value)."""
+    """Call fn() with a clean sys.argv, capturing stdout silently.
+    Returns (text, return_value). Output is replayed later in the
+    verdict-first report — nothing prints live except progress markers."""
     buf = io.StringIO()
-    real_stdout = sys.stdout          # save before redirect_stdout replaces it
-    tee = _Tee(real_stdout, buf)
     saved = sys.argv
     sys.argv = [saved[0]] + (argv_extra or [])
     try:
-        with contextlib.redirect_stdout(tee):
+        with contextlib.redirect_stdout(buf):
             result = fn()
     finally:
         sys.argv = saved
@@ -313,51 +339,6 @@ def _planning_cagr_argv(planning_cagr: str | None) -> list[str]:
     return ["--cagr", planning_cagr] if planning_cagr else []
 
 
-def prep_canonical_fi(planning_cagr: str | None = None) -> CanonicalFIRequiredScan | None:
-    """Compute the canonical (preservation-calibrated) FI bar for decumulation's
-    anchor display. Accumulation no longer targets this number — it sizes against
-    the income-formula required portfolio (W₀ = target_income / yield) so the
-    accum takeaway stays actionable. The preservation bar is shown as reference
-    in decumulation only. Returns None if config is unavailable."""
-    import tomllib
-    from models import Config
-    from monte_carlo import compute_canonical_fi_required_scan
-
-    try:
-        with open("config.toml", "rb") as f:
-            raw = tomllib.load(f)
-    except Exception as e:
-        print(f"  [!] Skipping canonical FI prep — couldn't load config.toml: {e}")
-        return None
-    config = Config.from_dict(raw)
-    config.planning_cagr_override = Config.parse_planning_cagr(planning_cagr)
-
-    infl_factor = (1.0 + config.expected_inflation_percent / 100.0) ** config.years
-    target_monthly_nom = config.target_monthly_retirement_income * infl_factor
-
-    print()
-    print("─" * 80)
-    print("FI CANONICAL BAR  —  preservation-calibrated required portfolio")
-    print("─" * 80)
-    print(f"  Preserve ≥{int(round(config.fi_preservation_ratio * 100))}% of initial wealth "
-          f"at yr {config.mc_decumulation_years}")
-    print(f"  Baseline P≥{int(round(config.fi_preservation_confidence_baseline * 100))}%, "
-          f"worst-SORR P≥{int(round(config.fi_preservation_confidence_stress * 100))}%")
-    print(f"  Computing scan…", end="", flush=True)
-    scan = compute_canonical_fi_required_scan(config, target_monthly_nom)
-    label = "reachable" if scan.canonical_reachable else "UNREACHABLE in search range"
-    print(f"\r  Result: €{scan.canonical_required_wealth:,.0f}  "
-          f"at {int(round(scan.canonical_optimal_bonds_pct * 100))}% bonds  "
-          f"(worst-SORR: {scan.worst_stress_label})  [{label}]                      ")
-    print("  → decumulation will use this as its anchor for the focused 3-question block.")
-    print("  Note: this dual-confidence bar adds a worst-SORR floor on top of the baseline")
-    print("        preservation confidence. Decumulation's body reports a separate focused-Q3")
-    print("        single-confidence number (typically smaller) — both are correct under their")
-    print("        own definitions; the gap is the cost of the SORR safety margin.")
-    print()
-    return scan
-
-
 def run_accum(verbose: bool = False, planning_cagr: str | None = None,
               ):
     """Run accumulation section.
@@ -369,7 +350,6 @@ def run_accum(verbose: bool = False, planning_cagr: str | None = None,
     """
     import main_portfolio_projection as m
 
-    _banner(1, "ACCUMULATION — target portfolio, contributions, financial freedom")
     argv = ["--no-clear", *_planning_cagr_argv(planning_cagr)]
     if verbose:
         argv.append("--verbose")
@@ -383,28 +363,17 @@ def run_accum(verbose: bool = False, planning_cagr: str | None = None,
 
 
 def run_decum(p50: float,
-              accum_required_it: float = 0.0,
-              canonical_scan: CanonicalFIRequiredScan | None = None,
               planning_cagr: str | None = None) -> tuple[str, DecumulationSummary | None]:
     """Run decumulation section. Returns (report text, typed summary).
 
     p50: accumulation P50 wealth from main_portfolio_projection — used as the
          starting wealth for survival curves, fan, GK range, SORR, and §4.11.
-    accum_required_it: IT scenario's income-formula required portfolio — used as
-         the §4.8 secondary 'reaching ≥' threshold for cross-comparison with accum's
-         success rate.
-    canonical_scan: precomputed canonical FI scan; if provided, decumulation skips
-         the internal scan and uses this one as the anchor.
     """
     import main_decumulation as m
 
-    print()
-    _banner(2, "DECUMULATION — withdrawal survival & wealth preservation under SORR")
     text, summary = _capture(
         lambda: m.main(
             portfolio_override=p50 if p50 > 0 else None,
-            accum_required_override=accum_required_it if accum_required_it > 0 else None,
-            canonical_fi_scan=canonical_scan,
             no_clear=True,
             cagr=planning_cagr,
         ),
@@ -421,7 +390,6 @@ def run_cagr(planning_cagr: str | None = None
     """
     import main_cagr_analysis as m
 
-    _banner(3, "INSTRUMENTS — historical CAGR, volatility, correlation + optimiser")
     text, result = _capture(m.main, ["--no-clear", *_planning_cagr_argv(planning_cagr)])
 
     # result is (list[TickerResult], OptimalPortfolioResult | None, CagrRealismSnapshot | None)
@@ -490,7 +458,7 @@ def main() -> None:
                              "(accepts 4, 4.0, 0.04, '4%%'); propagated to sub-scripts")
     args = parser.parse_args()
 
-    from reports.formatters import clear_terminal
+    from reports.formatters import clear_terminal, format_millions
     clear_terminal()
 
     start = _SECTIONS.index(args.start_from)
@@ -502,46 +470,95 @@ def main() -> None:
     tail_pct = 3
     config_toml = Path("config.toml").read_text() if Path("config.toml").exists() else ""
 
-    # Preflight: canonical FI bar — both pillars target the same preservation-calibrated number.
-    canonical_scan: CanonicalFIRequiredScan | None = None
-    if start <= _SECTIONS.index("decum"):
-        canonical_scan = prep_canonical_fi(planning_cagr=planning_cagr)
+    # ── Compute all sections silently, with live progress markers ────────────
+    print("RETIREMENT PLAN CHECK — computing… (report prints when all sections finish)")
 
-    # Section 1: Accumulation
     accum_required_it = 0.0
     verdict_inputs = None
     if start <= _SECTIONS.index("accum"):
+        print("  [1/3] accumulation…", flush=True)
         accum_text, p50, tail, required_cagr, tail_pct, accum_required_it, verdict_inputs = run_accum(
             verbose=args.verbose, planning_cagr=planning_cagr,
         )
 
-    # Section 2: Decumulation
     if start <= _SECTIONS.index("decum"):
-        decum_text, decum_summary = run_decum(p50,
-                                              accum_required_it=accum_required_it,
-                                              canonical_scan=canonical_scan,
-                                              planning_cagr=planning_cagr)
+        print("  [2/3] decumulation…", flush=True)
+        decum_text, decum_summary = run_decum(p50, planning_cagr=planning_cagr)
 
-    # Section 3: CAGR + optimiser
     if start <= _SECTIONS.index("cagr"):
+        print("  [3/3] instruments…", flush=True)
         cagr_text, _opt, realism = run_cagr(planning_cagr=planning_cagr)
 
     # Cache context for --from agent re-runs
     _save_context(accum_text, decum_text, cagr_text, required_cagr, decum_summary, plan_verdict, realism)
 
-    # Final consolidated verdict — pulls from accum + decum + cagr-realism, no new MC.
+    # ── Verdict first — 30-second top block, fully self-contained ────────────
+    print()
     if verdict_inputs is not None:
-        from reports.summary import print_final_verdict
-        print_final_verdict(verdict_inputs, decum_summary, realism)
+        from reports.summary import print_plan_check
+        print_plan_check(
+            verdict_inputs, decum_summary, realism,
+            income_bar=accum_required_it,
+            drift_prev=_read_prev_drift_row(),
+        )
+    else:
+        print("  (accumulation skipped — no verdict block; evidence sections below "
+              "use cached or partial data)")
 
-    # Drift log — one row per full pipeline run
+    # ── Evidence — the detailed sections behind the verdict ──────────────────
+    bar = "═" * 80
+    print(bar)
+    print("  EVIDENCE — details behind the verdict")
+    print(bar)
+
+    from datetime import date
+    cfg = verdict_inputs.config if verdict_inputs is not None else None
+    retire_year = date.today().year + int(round(cfg.years)) if cfg is not None else None
+    income_bar_txt = (f"the income min ({format_millions(accum_required_it)})"
+                      if accum_required_it > 0 else "the income min")
+
+    _evidence_banner(
+        "S1 · ACCUMULATION",
+        f"do I reach {income_bar_txt} by {retire_year or 'retirement'}?",
+        "INCOME pillar · lever A (save more) · lever C (redeploy)",
+    )
+    print(accum_text, end="")
+
+    end_year = (retire_year + cfg.mc_decumulation_years
+                if cfg is not None and retire_year is not None else None)
+    _evidence_banner(
+        "S2 · DECUMULATION",
+        f"does {retire_year or 'retirement'} wealth survive & preserve real value "
+        f"to {end_year or 'end of plan'}?",
+        "PRESERVATION pillar · lever B (retire later)",
+    )
+    print(decum_text, end="")
+
+    cagr_q = (f"does the real world deliver the {cfg.planning_cagr * 100:.1f}% I assumed?"
+              if cfg is not None else "does the real world deliver the assumed CAGR?")
+    _evidence_banner(
+        "S3 · INSTRUMENTS", cagr_q,
+        "RETURN pillar · ETF picks for the stock sleeve",
+    )
+    print(cagr_text, end="")
+
+    # ── History + drift + footer ──────────────────────────────────────────────
     joint_P = decum_summary.joint_survival_chained if decum_summary is not None else None
     _append_history(required_cagr=required_cagr, joint_P=joint_P, p50=p50)
 
-    # Monthly drift snapshot — keyed by MM-YYYY, kept only when success improves.
+    file_notes: list[str] = []
     if verdict_inputs is not None:
-        _append_drift_snapshot(verdict_inputs, accum_required_it)
-        _plot_drift_history()
+        drift_status = _append_drift_snapshot(verdict_inputs, accum_required_it)
+        file_notes.append(f"drift_history.csv ({drift_status})")
+        plot_note = _plot_drift_history()
+        if plot_note:
+            file_notes.append(plot_note)
+    file_notes.append("last_run_context.txt")
+
+    print()
+    print("─" * 80)
+    print(f"  Files: {' · '.join(file_notes)}")
+    print("─" * 80)
 
     # Section 4: AI Agent — only when explicitly requested
     if args.agent or args.start_from == "agent":

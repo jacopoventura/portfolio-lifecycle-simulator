@@ -23,7 +23,7 @@ Usage:
 import argparse
 import tomllib
 
-from models import CanonicalFIRequiredScan, Config, DecumulationSummary
+from models import Config, DecumulationSummary
 from monte_carlo import (
     compute_decum_inflation_cagr_grid,
     compute_focused_preservation_table,
@@ -66,8 +66,6 @@ def main(
     *,
     config_path: str = "config.toml",
     portfolio_override: float | None = None,
-    accum_required_override: float | None = None,
-    canonical_fi_scan: "CanonicalFIRequiredScan | None" = None,
     seed: int = 42,
     no_clear: bool = False,
     verbose: bool = False,
@@ -79,11 +77,7 @@ def main(
     verbose: if False (default), print only the Takeaway (which embeds the
         years-to-retirement tradeoff). If True, also print the Q1/Q2/Q3 tables,
         §4.10 inflation × CAGR grid, and §4.11 SORR preservation matrix.
-    accum_required_override / canonical_fi_scan: accepted for main.py compatibility
-    but no longer used by this focused pipeline.
     """
-    del accum_required_override, canonical_fi_scan  # accepted for back-compat only
-
     config = _load_config(config_path)
     config.planning_cagr_override = Config.parse_planning_cagr(cagr)
 
@@ -170,6 +164,14 @@ def main(
         None,
     )
 
+    # Max safe WD at the tradeoff row closest to the plan horizon — plan-check's
+    # preservation pillar uses it to quantify the spending gap at the plan date.
+    plan_years = int(round(config.years))
+    plan_row = min(
+        tradeoff.rows, key=lambda r: abs(r.years_to_retirement - plan_years),
+        default=None,
+    ) if tradeoff.rows else None
+
     # Canonical "required" for main.py's Plan Snapshot = Q3 wealth at the
     # configured preservation ratio.
     return DecumulationSummary(
@@ -178,6 +180,7 @@ def main(
         n_years=config.mc_decumulation_years,
         tradeoff_first_safe_year_from_now=first_safe.years_to_retirement if first_safe else None,
         tradeoff_first_safe_wd_today=first_safe.max_safe_monthly_today_eur if first_safe else None,
+        max_safe_wd_at_plan_horizon_today=plan_row.max_safe_monthly_today_eur if plan_row else None,
     )
 
 

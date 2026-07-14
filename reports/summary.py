@@ -18,6 +18,7 @@ from models import (
 from reports.formatters import (
     format_currency,
     format_currency_signed,
+    format_millions,
     format_ratio_as_percent,
 )
 from reports.section2 import (
@@ -52,8 +53,8 @@ def print_current_situation_summary(
 
     total = config.current_stock_value + config.current_bonds_value + config.current_cash
     monthly = config.annual_net_saving / 12
-    s_mo = monthly * config.maximum_stock_monthly_investment_pct
-    b_mo = monthly * config.maximum_bonds_monthly_investment_pct
+    s_mo = monthly * config.stock_monthly_investment_pct
+    b_mo = monthly * config.bonds_monthly_investment_pct
     c_mo = max(0.0, monthly - s_mo - b_mo)
 
     print(f"  Portfolio today : {format_currency(total)}")
@@ -425,8 +426,8 @@ def print_takeaway(
 
     # 2. Current situation with expected success rate
     total = config.current_stock_value + config.current_bonds_value + config.current_cash
-    s_mo = monthly_saving * config.maximum_stock_monthly_investment_pct
-    b_mo = monthly_saving * config.maximum_bonds_monthly_investment_pct
+    s_mo = monthly_saving * config.stock_monthly_investment_pct
+    b_mo = monthly_saving * config.bonds_monthly_investment_pct
     c_mo = max(0.0, monthly_saving - s_mo - b_mo)
     current_year = datetime.date.today().year
     print(f"  2. Current situation  (target success ≥ {target_pct}% over {years}y)")
@@ -598,191 +599,337 @@ def print_takeaway(
     print()
 
 
-def _identify_primary_lever(
-    accum_ok: bool,
-    preserve_ok: bool | None,
-    cagr_ok: bool | None,
-    decum_summary: DecumulationSummary | None,
-    horizon: int,
-    target_today: float,
-) -> str | None:
-    if not accum_ok and preserve_ok is False:
-        if (decum_summary is not None
-                and decum_summary.tradeoff_first_safe_year_from_now is not None
-                and decum_summary.tradeoff_first_safe_year_from_now <= horizon + 5):
-            extra = decum_summary.tradeoff_first_safe_year_from_now - horizon
-            return f"extend horizon +{extra}y (closes both accumulation and preservation gaps)"
-        return "raise monthly saving (Lever A) — biggest impact on income success"
-    if not accum_ok:
-        return "raise monthly saving (Lever A) — income success below target"
-    if preserve_ok is False:
-        if (decum_summary is not None
-                and decum_summary.tradeoff_first_safe_year_from_now is not None):
-            extra = decum_summary.tradeoff_first_safe_year_from_now - horizon
-            return f"extend horizon +{extra}y (Lever B) — preservation requires more time"
-        return "reduce target spend or extend horizon — preservation gap too wide at current plan"
-    if cagr_ok is False:
-        return "re-run with --cagr at the CAPE-implied rate to see if the plan still holds"
-    return None
+# ── Plan check — verdict-first report header ─────────────────────────────────
+#
+# Replaces the old bottom-of-run FINAL VERDICT (removed 2026-07). Printed FIRST,
+# fully self-contained: every claim carries its number, its bar, and its unit.
+# Layout: header → 3 pillars → since-last-run → levers → three-bars legend.
+
+_PILLAR_INDENT = " " * 18  # continuation indent under "  ✓ PILLARNAME    "
 
 
-def print_final_verdict(
+def _fmt_k(v: float) -> str:
+    """Compact thousands: 108_000 → '108k'."""
+    return f"{v / 1e3:,.0f}k"
+
+
+def _pillar(mark: str, name: str, first_line: str) -> None:
+    print(f"  {mark} {name:<14}{first_line}")
+
+
+def _pillar_cont(line: str) -> None:
+    print(f"{_PILLAR_INDENT}{line}")
+
+
+def _read_cape_ratio() -> float | None:
+    """CAPE ratio from config.toml (not part of Config). None if unavailable."""
+    try:
+        import tomllib
+        with open("config.toml", "rb") as f:
+            raw = tomllib.load(f).get("cape_ratio")
+        return float(raw) if raw is not None else None
+    except Exception:
+        return None
+
+
+def print_plan_check(
     verdict: VerdictInputs,
     decum_summary: DecumulationSummary | None,
     realism: CagrRealismSnapshot | None,
+    income_bar: float,
+    drift_prev: dict | None,
 ) -> None:
-    """Consolidated end-of-run verdict: cross-pillar status dashboard, primary
-    gap/lever one-liner, then detailed levers and watch line. Pulls from data
-    already computed by accum + decum + cagr — no new MC."""
+    """Verdict-first plan check: 30-second top block with conclusions.
+
+    income_bar:  IT income-formula required portfolio; 0 when unavailable.
+    drift_prev:  previous month's drift row (main._read_prev_drift_row) or None.
+    Pulls only from data already computed — no new MC.
+    """
     config = verdict.config
     mc = verdict.mc_it
     target_success = verdict.target_success
     target_pct = int(round(target_success * 100))
-
-    monthly_saving = config.annual_net_saving / 12
-    cur_stocks = monthly_saving * config.maximum_stock_monthly_investment_pct
-    cur_bonds = monthly_saving * config.maximum_bonds_monthly_investment_pct
-    cur_total = cur_stocks + cur_bonds
-    target_today = config.target_monthly_retirement_income
     horizon = int(round(config.years))
+    today = datetime.date.today()
+    retire_year = today.year + horizon
+    target_today = config.target_monthly_retirement_income
+    infl_factor = (1.0 + config.expected_inflation_percent / 100.0) ** config.years
+    stock_pct = int(round(100 - config.bonds_percentage))
+    bonds_pct = int(round(config.bonds_percentage))
+    preserve_pct = int(round(config.fi_preservation_ratio * 100))
+    total_today = config.current_stock_value + config.current_bonds_value + config.current_cash
+
+    # MC distribution of the plan's final wealth, deflated to today's €.
+    # Keys follow the configured target: P{100-target} / P50 / P{target}.
+    tail_key = 100 - target_pct
+    mc_pcts = mc.final_portfolio_percentiles
+    mc_today = {
+        k: mc_pcts[k] / infl_factor
+        for k in (tail_key, 50, target_pct)
+        if k in mc_pcts and infl_factor > 0
+    }
+
+    # ── Pillar states ─────────────────────────────────────────────────────────
     income_p = mc.success_rate_income_only
-    accum_ok = income_p >= target_success
-
-    print()
-    print("─" * 80)
-    print(f"{'FINAL VERDICT':^80}")
-    print("─" * 80)
-    print(f"  Scope: IT scenario · {horizon}y horizon · target €{format_currency(target_today)}/mo today's €")
-    print()
-
-    # ── Cross-pillar status dashboard ────────────────────────────────────────
-    accum_mark = "✓" if accum_ok else "✗"
-    print(f"  {accum_mark} Accumulation   : income success {income_p * 100:.1f}% "
-          f"(need {target_pct}%)")
+    income_ok = income_p >= target_success
 
     preserve_ok: bool | None = None
+    safe_yr = max_safe = None
     if decum_summary is not None:
-        safe_wd = decum_summary.tradeoff_first_safe_wd_today
         safe_yr = decum_summary.tradeoff_first_safe_year_from_now
-        if safe_yr is not None and safe_yr <= horizon:
-            preserve_ok = True
-            print(f"  ✓ Preservation   : max safe WD €{format_currency(safe_wd or 0)}/mo "
-                  f"≥ €{format_currency(target_today)} target at {horizon}y")
-        else:
-            preserve_ok = False
-            extra = f"first safe at ~{safe_yr}y" if safe_yr is not None else "not within window"
-            print(f"  ✗ Preservation   : target spend not preserved at {horizon}y ({extra})")
-    else:
-        print(f"  - Preservation   : not computed (decumulation skipped)")
+        max_safe = decum_summary.max_safe_wd_at_plan_horizon_today
+        preserve_ok = safe_yr is not None and safe_yr <= horizon
 
     planning = config.planning_cagr
-    cagr_ok: bool | None = None
-    if realism is not None and realism.cape_nominal_cagr is not None:
-        cape = realism.cape_nominal_cagr
-        delta_pp = (planning - cape) * 100
-        if delta_pp > 2.0:
-            cagr_ok = False
-            print(f"  ✗ CAGR realism   : planning {planning * 100:.1f}% > CAPE-implied "
-                  f"{cape * 100:.1f}% (+{delta_pp:.1f}pp gap)")
+    cape = realism.cape_nominal_cagr if realism is not None else None
+    return_ok: bool | None = None if cape is None else (planning - cape) * 100 <= 2.0
+
+    states = [income_ok, preserve_ok, return_ok]
+    evaluated = sum(1 for s in states if s is not None)
+    passed = sum(1 for s in states if s is True)
+    on_track = income_ok and preserve_ok is not False and return_ok is not False
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    bar = "═" * 80
+    print(bar)
+    print(f"  RETIREMENT PLAN CHECK — {today.isoformat()}")
+    print(f"  Plan   : retire {retire_year} ({horizon}y, age {config.current_age + horizon}) · "
+          f"spend €{format_currency(target_today)}/mo today's € · IT taxes")
+    print(f"  Assumes: stock CAGR {planning * 100:.1f}% · "
+          f"inflation {config.expected_inflation_percent:.1f}% · "
+          f"{stock_pct}/{bonds_pct} stocks/bonds at retirement")
+    print(f"  Today  : €{format_currency(total_today)} "
+          f"(stocks {_fmt_k(config.current_stock_value)} · "
+          f"bonds {_fmt_k(config.current_bonds_value)} · "
+          f"cash {_fmt_k(config.current_cash)})")
+    monthly_saving = config.annual_net_saving / 12.0
+    hdr_stocks_mo = monthly_saving * config.stock_monthly_investment_pct
+    hdr_bonds_mo = monthly_saving * config.bonds_monthly_investment_pct
+    hdr_cash_mo = max(0.0, monthly_saving - hdr_stocks_mo - hdr_bonds_mo)
+    print(f"  Saving : €{format_currency(config.annual_net_saving)}/yr ⇒ "
+          f"stocks €{format_currency(hdr_stocks_mo)}/mo · "
+          f"bonds €{format_currency(hdr_bonds_mo)}/mo · "
+          f"cash €{format_currency(hdr_cash_mo)}/mo")
+    print(bar)
+    print()
+    status = "ON TRACK" if on_track else "NOT ON TRACK"
+    print(f"  VERDICT — {status}  ({passed} of {evaluated} pillars pass)")
+    print()
+
+    # ── INCOME pillar ─────────────────────────────────────────────────────────
+    conf_word = "with" if income_ok else "with only"
+    _pillar("✓" if income_ok else "✗", "INCOME",
+            f"You can fund €{format_currency(target_today)}/mo from {retire_year} "
+            f"{conf_word} {income_p * 100:.1f}% confidence")
+    line = f"(min: {target_pct}%)."
+    if income_bar > 0:
+        # Same units as the MC outcome line below (today's €); the nominal
+        # figure is kept in parens because the evidence tables use 2042 prices.
+        if infl_factor > 0:
+            line += (f" Wealth needed: {format_millions(income_bar / infl_factor)} "
+                     f"today's € ({format_millions(income_bar)} at {retire_year} prices).")
         else:
-            cagr_ok = True
-            label = "conservative" if delta_pp < -2.0 else "aligned"
-            print(f"  ✓ CAGR realism   : planning {planning * 100:.1f}% vs CAPE-implied "
-                  f"{cape * 100:.1f}% ({label})")
+            line += f" Wealth needed: {format_millions(income_bar)}."
+    _pillar_cont(line)
+    if len(mc_today) == 3:
+        # MC of the CURRENT situation: today's portfolio + current contribution
+        # split, no levers applied (run_monte_carlo_simulation with the
+        # current_stock_mo/current_bonds_mo overrides).
+        _pillar_cont(f"Current plan outcome (MC, today's €): "
+                     f"P{tail_key} {format_millions(mc_today[tail_key])} · "
+                     f"P50 {format_millions(mc_today[50])} · "
+                     f"P{target_pct} {format_millions(mc_today[target_pct])}.")
+
+    # Mix risk — the composition test (stocks AND bonds each reach their 50/50
+    # quota). Income can pass while this fails: bonds/cash overshoot compensates
+    # a lagging stock sleeve. Shown only when it fails, so S1's ✗ isn't mistaken
+    # for an income problem. The fix (re-split) is lever D below.
+    mix_risk_fails = mc.success_rate < target_success
+    if mix_risk_fails:
+        _pillar_cont(f"Mix risk: the {stock_pct}/{bonds_pct} shape itself is only "
+                     f"{mc.success_rate * 100:.1f}% likely "
+                     f"(stocks {mc.success_rate_stock_only * 100:.1f}% · "
+                     f"bonds {mc.success_rate_bond_only * 100:.1f}%).")
+
+    # ── PRESERVATION pillar ───────────────────────────────────────────────────
+    if decum_summary is None:
+        _pillar("-", "PRESERVATION", "not computed (decumulation skipped this run)")
     else:
-        print(f"  - CAGR realism   : not available (CAPE data missing)")
+        end_year = retire_year + decum_summary.n_years
+        if preserve_ok:
+            _pillar("✓", "PRESERVATION",
+                    f"Spending €{format_currency(target_today)}/mo from {retire_year} keeps "
+                    f"≥{preserve_pct}% of real wealth")
+            line = f"through {end_year}"
+            if max_safe is not None:
+                line += f" (max safe spend €{format_currency(max_safe)}/mo ≥ target)"
+            _pillar_cont(line + ".")
+        else:
+            _pillar("✗", "PRESERVATION",
+                    f"Spending €{format_currency(target_today)}/mo from {retire_year} depletes "
+                    f"real wealth over {decum_summary.n_years}y.")
+            if max_safe is not None:
+                gap = target_today - max_safe
+                _pillar_cont(f"Max spend that keeps ≥{preserve_pct}% real wealth: "
+                             f"€{format_currency(max_safe)}/mo — a €{format_currency(gap)}/mo gap.")
+            if safe_yr is not None:
+                _pillar_cont(f"Retiring ~{today.year + safe_yr} instead closes it "
+                             f"with no extra saving.")
+            else:
+                _pillar_cont("No retirement year within the tradeoff window closes it "
+                             "at current saving.")
 
+    # ── RETURN pillar ─────────────────────────────────────────────────────────
+    if cape is None:
+        _pillar("-", "RETURN", "CAPE data unavailable — realism unchecked this run.")
+    else:
+        cape_ratio = _read_cape_ratio()
+        cape_str = f"CAPE ({cape_ratio:.0f})" if cape_ratio is not None else "CAPE"
+        if return_ok:
+            label = "conservative" if (planning - cape) * 100 < -2.0 else "aligned"
+            _pillar("✓", "RETURN",
+                    f"Planning CAGR {planning * 100:.1f}% vs {cape_str}-implied "
+                    f"{cape * 100:.1f}% — {label}.")
+        else:
+            _pillar("✗", "RETURN",
+                    f"The {planning * 100:.1f}% CAGR assumption is optimistic — {cape_str} implies")
+            _pillar_cont(f"~{cape * 100:.1f}%. Both pillars above inherit this optimism.")
+            midpoint = (planning + cape) / 2.0 * 100  # halfway sanity re-run, matches S3 advice
+            _pillar_cont(f"Cross-check: python main.py --cagr {midpoint:.0f}")
+
+    # ── Since last run ────────────────────────────────────────────────────────
     print()
+    if drift_prev is None:
+        print("  SINCE LAST RUN: first recorded run — no history yet")
+    else:
+        delta_pp = (income_p - drift_prev["sr_total"]) * 100
+        changes: list[str] = []
+        if abs(drift_prev["bonds_pct"] - config.bonds_percentage) > 0.01:
+            changes.append(f"bonds {drift_prev['bonds_pct']:.0f}%→{bonds_pct}%")
+        if drift_prev["horizon"] != horizon:
+            changes.append(f"horizon {drift_prev['horizon']}y→{horizon}y")
+        if abs(drift_prev["target_income"] - target_today) > 0.01:
+            changes.append(f"target €{format_currency(drift_prev['target_income'])}"
+                           f"→€{format_currency(target_today)}/mo")
+        print(f"  SINCE LAST RUN ({drift_prev['month']})")
+        if changes:
+            # Different plan on file — a success-rate delta would compare apples
+            # to oranges, so name the changes instead.
+            print(f"    plan changed: {' · '.join(changes)} — success delta not comparable")
+        else:
+            print(f"    income success {income_p * 100:.1f}% ({delta_pp:+.1f}pp) · "
+                  f"plan params unchanged ({bonds_pct}% bonds, {horizon}y, "
+                  f"€{format_currency(target_today)}/mo)")
 
-    # ── One-liner: overall status + primary gap + primary lever ───────────────
-    all_ok = accum_ok and preserve_ok is True and cagr_ok is not False
-    if all_ok:
-        print(f"  VERDICT: ON TRACK — all three pillars pass at current plan.")
-        print(f"    allocation: stocks €{format_currency(cur_stocks)} + "
-              f"bonds €{format_currency(cur_bonds)} = €{format_currency(cur_total)}/mo")
-        _verdict_watch(config, realism)
-        print()
-        return
-
-    gaps: list[str] = []
-    if not accum_ok:
-        gaps.append(f"income success {income_p * 100:.0f}% < {target_pct}%")
-    if preserve_ok is False:
-        gaps.append("preservation gap at target horizon")
-    if cagr_ok is False and realism is not None and realism.cape_nominal_cagr is not None:
-        gaps.append(f"CAGR assumption +{(planning - realism.cape_nominal_cagr) * 100:.0f}pp above CAPE")
-    gap_str = "; ".join(gaps)
-    print(f"  VERDICT: NOT ON TRACK — {gap_str}")
-
-    primary_lever = _identify_primary_lever(
-        accum_ok, preserve_ok, cagr_ok, decum_summary, horizon, target_today,
-    )
-    if primary_lever:
-        print(f"  Primary lever: {primary_lever}")
+    # ── Levers, primary first ─────────────────────────────────────────────────
     print()
+    print("  WHAT MOVES THE NEEDLE")
 
-    # Lever A — raise saving at fixed-CAGR min split.
-    assumed = config.expected_yearly_growth_stocks_percent / 100
-    cagr_idx = _closest_cagr_idx(verdict.grids_it[0].cagr_values, assumed)
-    a_stocks, a_bonds, a_p = _find_min_total_income_split(verdict.grids_it, cagr_idx, target_success)
-    a_total = a_stocks + a_bonds
-    a_delta = a_total - cur_total
-    a_stock_delta = a_stocks - cur_stocks
-    a_bond_delta = a_bonds - cur_bonds
-    a_flag = "✓" if a_p >= target_success else " "
-    print(f"  Lever A  (raise saving): stocks €{format_currency(a_stocks)} + "
-          f"bonds €{format_currency(a_bonds)} = €{format_currency(a_total)}/mo")
-    print(f"           vs current: {_signed_eur_delta(a_stock_delta)} stocks · "
-          f"{_signed_eur_delta(a_bond_delta)} bonds · "
-          f"{_signed_eur_delta(a_delta)} net")
-    print(f"           → income success {a_flag}{a_p * 100:.1f}%")
+    if income_ok:
+        lever_a = "not needed: income pillar already passes"
+    else:
+        assumed = config.expected_yearly_growth_stocks_percent / 100
+        idx = _closest_cagr_idx(verdict.grids_it[0].cagr_values, assumed)
+        a_s, a_b, a_p = _find_min_total_income_split(verdict.grids_it, idx, target_success)
+        lever_a = (f"stocks €{format_currency(a_s)}/mo + bonds €{format_currency(a_b)}/mo "
+                   f"= €{format_currency(a_s + a_b)}/mo → income {a_p * 100:.1f}%")
 
-    # Lever B — extend horizon. From decum tradeoff: first row where Max safe WD ≥ target.
-    if decum_summary is not None and decum_summary.tradeoff_first_safe_year_from_now is not None:
-        yrs = decum_summary.tradeoff_first_safe_year_from_now
+    if decum_summary is not None and safe_yr is not None:
         wd = decum_summary.tradeoff_first_safe_wd_today or 0.0
-        print(f"  Lever B  (extend horizon): keep current saving + allocation, retire in ~{yrs}y")
-        print(f"           → Max safe WD €{format_currency(wd)}/mo today's € ≥ €{format_currency(target_today)} target")
+        lever_b = f"~{today.year + safe_yr}: max safe spend €{format_currency(wd)}/mo ≥ target"
     else:
-        print(f"  Lever B  (extend horizon): target spend not reached within the tradeoff window")
+        lever_b = "no retirement year in the tradeoff window reaches target spend"
 
-    # Lever C — redeploy existing cash via the optimizer.
-    p = _best_income_point(verdict.opt_result_it)
-    if p is not None:
+    pt = _best_income_point(verdict.opt_result_it)
+    if pt is not None:
         moves = []
-        if p.extra_stocks > 0:
-            moves.append(f"€{format_currency(p.extra_stocks)} cash→stocks")
-        if p.extra_bonds > 0:
-            moves.append(f"€{format_currency(p.extra_bonds)} cash→bonds")
+        if pt.extra_stocks > 0:
+            moves.append(f"€{_fmt_k(pt.extra_stocks)}→stocks")
+        if pt.extra_bonds > 0:
+            moves.append(f"€{_fmt_k(pt.extra_bonds)}→bonds")
         move_str = " + ".join(moves) if moves else "no upfront move"
-        c_flag = "✓" if p.best_success_rate >= target_success else " "
-        c_total = p.income_stock_mo + p.income_bonds_mo
-        print(f"  Lever C  (redeploy cash): {move_str}, then stocks €{format_currency(p.income_stock_mo)}/mo + "
-              f"bonds €{format_currency(p.income_bonds_mo)}/mo (total €{format_currency(c_total)}/mo)")
-        print(f"           → income success {c_flag}{p.best_success_rate * 100:.1f}%")
+        note = " (margin, not preservation)" if preserve_ok is False else ""
+        lever_c = f"{move_str}: income {pt.best_success_rate * 100:.1f}%{note}"
+    else:
+        lever_c = "optimizer result unavailable"
 
-    _verdict_watch(config, realism)
+    primary = "A" if not income_ok else ("B" if preserve_ok is False else None)
+    levers = [("A. Save more", lever_a), ("B. Retire later", lever_b),
+              ("C. Redeploy cash", lever_c)]
+
+    # Lever D — re-split monthly saving to fix the 50/50 mix risk flagged under
+    # INCOME. Only offered when the shape test fails and the grid is available.
+    # The grid cells use fewer sims (mc_grid_n_simulations) than the headline MC,
+    # so its argmax carries ~±0.3pp noise: only recommend a re-split when it
+    # meets the target or beats the current split by more than that noise band.
+    if mix_risk_fails and verdict.combined_it is not None:
+        assumed = config.expected_yearly_growth_stocks_percent / 100
+        c_idx = _closest_cagr_idx(verdict.combined_it.cagr_values, assumed)
+        c_s, c_b, c_r = _find_min_total_combined(verdict.combined_it, c_idx, target_success)
+        cur_s = config.annual_net_saving / 12 * config.stock_monthly_investment_pct
+        cur_b = config.annual_net_saving / 12 * config.bonds_monthly_investment_pct
+        gain_pp = (c_r - mc.success_rate) * 100
+        if c_r >= target_success or gain_pp > 1.0:
+            reach = "" if c_r >= target_success else " (best reachable)"
+            levers.append((
+                "D. Re-split saving",
+                f"stocks €{format_currency(c_s)} + bonds €{format_currency(c_b)}/mo "
+                f"(now €{format_currency(cur_s)}+€{format_currency(cur_b)}) "
+                f"→ shape {c_r * 100:.1f}%{reach}, {gain_pp:+.1f}pp",
+            ))
+        else:
+            levers.append((
+                "D. Re-split saving",
+                f"no gain: best grid split {c_r * 100:.1f}% ≈ current "
+                f"{mc.success_rate * 100:.1f}% — {target_pct}% needs more than a re-split",
+            ))
+
+    # Primary lever first, actionable levers next, non-actionable ones last.
+    def _lever_rank(lv: tuple[str, str]) -> int:
+        if primary is not None and lv[0].startswith(primary):
+            return 0
+        return 2 if lv[1].startswith(("not needed", "no gain")) else 1
+    levers.sort(key=_lever_rank)
+    for label, text in levers:
+        suffix = "  ← primary lever" if primary is not None and label.startswith(primary) else ""
+        print(f"    {label:<19}→ {text}{suffix}")
+
+    sens = verdict.sensitivity_it
+    if sens is not None and sens.entries:
+        top = _worst_negative_entries(sens, top_n=1)[0]
+        worst = min(top.success_up - top.success_base, top.success_down - top.success_base)
+        side = "+" if (top.success_up - top.success_base) <= (top.success_down - top.success_base) else "−"
+        delta_label = top.delta_label.lstrip("±")
+        print(f"    Watch: {side}{delta_label} {top.parameter.lower()} → "
+              f"{worst * 100:+.0f}pp income success (biggest single risk)")
+
+    # ── Three-numbers legend ──────────────────────────────────────────────────
     print()
+    print("  THREE WEALTH NUMBERS BELOW — don't confuse them (all today's €; "
+          f"evidence tables use {retire_year} prices):")
+    if income_bar > 0 and infl_factor > 0:
+        print(f"    {format_millions(income_bar / infl_factor):<8} income min        "
+              f"yield covers €{format_currency(target_today)}/mo; may deplete "
+              f"(= {format_millions(income_bar)} in tables)")
+    if 50 in mc_today:
+        print(f"    {format_millions(mc_today[50]):<8} plan P50 (MC)     "
+              f"typical wealth the current plan reaches by {retire_year}")
+    if decum_summary is not None and infl_factor > 0:
+        pres = decum_summary.required_portfolio_fi_canonical
+        print(f"    {format_millions(pres / infl_factor):<8} "
+              f"preservation min  keeps ≥{preserve_pct}% real wealth to "
+              f"{retire_year + decum_summary.n_years} "
+              f"(= {format_millions(pres)} in tables)")
 
-
-def _signed_eur_delta(v: float) -> str:
-    """Render a € delta with explicit sign: '+€636' / '-€500' / '€0'."""
-    if v > 0:
-        return f"+€{format_currency(v)}"
-    if v < 0:
-        return f"-€{format_currency(-v)}"
-    return "€0"
-
-
-def _verdict_watch(config: Config, realism: CagrRealismSnapshot | None) -> None:
-    """One-line model-risk watch — planning CAGR vs CAPE-implied."""
-    planning = config.planning_cagr
-    if realism is None or realism.cape_nominal_cagr is None:
-        return
-    cape = realism.cape_nominal_cagr
-    delta = planning - cape
-    if delta > 0.02:
-        print(f"  Watch    : planning CAGR {planning * 100:.1f}% > CAPE-implied {cape * 100:.1f}% "
-              f"— if returns disappoint, any gap widens")
-    elif delta < -0.02:
-        print(f"  Watch    : planning CAGR {planning * 100:.1f}% < CAPE-implied {cape * 100:.1f}% — conservative")
+    # ── Glossary ──────────────────────────────────────────────────────────────
+    print()
+    print("  GLOSSARY")
+    print(f"    {'MC':<5} Monte Carlo: {mc.n_simulations:,} simulated market futures, "
+          f"not a single forecast")
+    if len(mc_today) == 3:
+        print(f"    {f'P{tail_key}':<5} bad luck — worst {tail_key}% of MC futures "
+              f"end below this value")
+        print(f"    {'P50':<5} typical — median MC future; half end below, half above")
+        print(f"    {f'P{target_pct}':<5} good luck — only {100 - target_pct}% of MC futures "
+              f"end above this value")
+    print()

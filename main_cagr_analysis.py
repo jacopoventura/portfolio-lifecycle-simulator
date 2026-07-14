@@ -2312,7 +2312,7 @@ def main() -> None:
         planning_cagr_override: float | None = cli_planning_cagr_override
         _initial_stock: float             = float(_raw_cfg.get("current_stock_value", 0.0))
         _annual_saving: float             = float(_raw_cfg.get("annual_net_saving", 0.0))
-        _stock_pct: float                 = float(_raw_cfg.get("maximum_stock_monthly_investment_pct", 0.0))
+        _stock_pct: float                 = float(_raw_cfg.get("stock_monthly_investment_pct", 0.0))
         dca_monthly: float                = (_annual_saving / 12.0) * _stock_pct
         opt_cfg: dict                     = _raw_cfg.get("etf_optimizer", {})
         optimize_tickers: list[str]       = opt_cfg.get("optimize_tickers", [])

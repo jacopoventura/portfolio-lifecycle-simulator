@@ -44,8 +44,8 @@ def cfg() -> Config:
         interest_on_cash_pa=2.0,
         annual_net_saving=30_000.0,
         annual_contribution_growth_percent=0.0,
-        maximum_stock_monthly_investment_pct=0.5,
-        maximum_bonds_monthly_investment_pct=0.3,
+        stock_monthly_investment_pct=0.5,
+        bonds_monthly_investment_pct=0.3,
         target_monthly_retirement_income=2_500.0,
         years=15.0,
         expected_inflation_percent=2.0,
@@ -110,8 +110,8 @@ def derived(cfg):
         annual_contribution_growth=cfg.annual_contribution_growth_percent / 100,
     )
 
-    cash_pct     = max(0.0, 1.0 - cfg.maximum_stock_monthly_investment_pct
-                             - cfg.maximum_bonds_monthly_investment_pct)
+    cash_pct     = max(0.0, 1.0 - cfg.stock_monthly_investment_pct
+                             - cfg.bonds_monthly_investment_pct)
     monthly_cash = cfg.annual_net_saving / 12 * cash_pct
     ctb = cash_converted_to_bonds_at_horizon(
         current_cash=cfg.current_cash,
@@ -243,8 +243,8 @@ class TestScenario:
 class TestMonteCarlo:
     @pytest.fixture(scope="class")
     def mc_de(self, cfg, derived):
-        current_stock_mo = cfg.annual_net_saving / 12 * cfg.maximum_stock_monthly_investment_pct
-        current_bonds_mo = cfg.annual_net_saving / 12 * cfg.maximum_bonds_monthly_investment_pct
+        current_stock_mo = cfg.annual_net_saving / 12 * cfg.stock_monthly_investment_pct
+        current_bonds_mo = cfg.annual_net_saving / 12 * cfg.bonds_monthly_investment_pct
         return run_monte_carlo_simulation(
             config=cfg, scenario=derived["scenario_de"],
             n_simulations=2_000,
@@ -333,8 +333,8 @@ class TestPipelineConsistency:
             interest_on_cash_pa=2.0,
             annual_net_saving=30_000.0,
             annual_contribution_growth_percent=0.0,
-            maximum_stock_monthly_investment_pct=0.5,
-            maximum_bonds_monthly_investment_pct=0.3,
+            stock_monthly_investment_pct=0.5,
+            bonds_monthly_investment_pct=0.3,
             target_monthly_retirement_income=2_500.0,
             years=15.0,
             expected_inflation_percent=2.0,
@@ -405,8 +405,8 @@ class TestPipelineConsistency:
             stock_teilfreistellung=cfg_rich.teilfreistellung,
             annual_contribution_growth=0.0,
         )
-        stock_mo = cfg_rich.annual_net_saving / 12 * cfg_rich.maximum_stock_monthly_investment_pct
-        bonds_mo = cfg_rich.annual_net_saving / 12 * cfg_rich.maximum_bonds_monthly_investment_pct
+        stock_mo = cfg_rich.annual_net_saving / 12 * cfg_rich.stock_monthly_investment_pct
+        bonds_mo = cfg_rich.annual_net_saving / 12 * cfg_rich.bonds_monthly_investment_pct
 
         mc_base = run_monte_carlo_simulation(
             config=cfg, scenario=derived["scenario_de"],
@@ -414,8 +414,8 @@ class TestPipelineConsistency:
             stock_std=cfg.mc_stock_return_std_percent / 100,
             inflation_std=cfg.mc_inflation_std_percent / 100,
             seed=42,
-            monthly_stock_contribution_override=cfg.annual_net_saving / 12 * cfg.maximum_stock_monthly_investment_pct,
-            monthly_bonds_contribution_override=cfg.annual_net_saving / 12 * cfg.maximum_bonds_monthly_investment_pct,
+            monthly_stock_contribution_override=cfg.annual_net_saving / 12 * cfg.stock_monthly_investment_pct,
+            monthly_bonds_contribution_override=cfg.annual_net_saving / 12 * cfg.bonds_monthly_investment_pct,
         )
         mc_rich = run_monte_carlo_simulation(
             config=cfg_rich, scenario=sc,

@@ -41,15 +41,15 @@ def print_projection_report(
     print(f"  Monthly net saving: {format_currency(monthly_net_saving)}")
     print(
         "  Monthly contribution to stocks, year 1 "
-        f"({format_ratio_as_percent(result.maximum_stock_monthly_investment_pct)}): "
+        f"({format_ratio_as_percent(result.stock_monthly_investment_pct)}): "
         f"{format_currency(result.monthly_stock_contribution)}"
     )
     print(
         "  Monthly contribution to bonds, year 1  "
-        f"({format_ratio_as_percent(result.maximum_bonds_monthly_investment_pct)}): "
+        f"({format_ratio_as_percent(result.bonds_monthly_investment_pct)}): "
         f"{format_currency(result.monthly_bonds_contribution)}"
     )
-    print(f"  Monthly contribution to cash, year 1   ({format_ratio_as_percent(1.0 - result.maximum_stock_monthly_investment_pct - result.maximum_bonds_monthly_investment_pct)}): {format_currency(result.monthly_cash_contribution)}")
+    print(f"  Monthly contribution to cash, year 1   ({format_ratio_as_percent(1.0 - result.stock_monthly_investment_pct - result.bonds_monthly_investment_pct)}): {format_currency(result.monthly_cash_contribution)}")
     print(f"  Annual contribution growth: {format_ratio_as_percent(result.annual_contribution_growth_percent / 100)}")
     print()
     print("Projection at horizon")

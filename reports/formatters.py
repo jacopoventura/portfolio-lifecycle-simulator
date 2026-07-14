@@ -9,6 +9,11 @@ def format_currency_signed(value: float) -> str:
     return f"{value:+,.0f}"
 
 
+def format_millions(value: float) -> str:
+    """Compact millions for the plan-check block: 1_991_845 → '€1.99M'."""
+    return f"€{value / 1e6:.2f}M"
+
+
 def format_ratio_as_percent(value: float) -> str:
     return f"{value * 100:.2f}%"
 

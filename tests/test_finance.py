@@ -23,8 +23,8 @@ def _make_config(**overrides) -> Config:
         interest_on_cash_pa=2.0,
         annual_net_saving=24_000.0,
         annual_contribution_growth_percent=0.0,
-        maximum_stock_monthly_investment_pct=0.5,
-        maximum_bonds_monthly_investment_pct=0.3,
+        stock_monthly_investment_pct=0.5,
+        bonds_monthly_investment_pct=0.3,
         target_monthly_retirement_income=3_000.0,
         years=1.0,
         expected_inflation_percent=2.0,
@@ -154,8 +154,8 @@ class TestValidateProjectionInputs:
 
     def test_allocation_sum_exceeds_one_raises(self):
         config = _make_config(
-            maximum_stock_monthly_investment_pct=0.9,
-            maximum_bonds_monthly_investment_pct=0.2,
+            stock_monthly_investment_pct=0.9,
+            bonds_monthly_investment_pct=0.2,
         )
         with pytest.raises(ValueError):
             validate_projection_inputs(config, 0.02)
@@ -226,7 +226,7 @@ class TestRunProjection:
         config = _make_config()
         result = run_projection(config, stock_expected_yield=0.07)
         initial_cost_basis = config.current_stock_value - config.current_stock_unrealized_gain
-        monthly_stock = config.annual_net_saving / 12 * config.maximum_stock_monthly_investment_pct
+        monthly_stock = config.annual_net_saving / 12 * config.stock_monthly_investment_pct
         expected_cost_basis = initial_cost_basis + monthly_stock * 12  # 1 year, no growth
         assert result.cost_basis_stock == pytest.approx(expected_cost_basis, rel=1e-9)
 
