@@ -728,6 +728,11 @@ class DecumulationSummary:
     # Max safe real WD (today's €) at the tradeoff row closest to the plan
     # horizon — quantifies the preservation pillar's spending gap in plan-check.
     max_safe_wd_at_plan_horizon_today: float | None = None
+    # Median remaining real wealth after n_years of withdrawals (retirement-day
+    # €), anchored at the IT required portfolio — shown in plan-check's
+    # preservation pillar. Ratio = fraction of that starting portfolio.
+    p50_final_real_wealth: float | None = None
+    p50_final_real_ratio: float | None = None
 
 
 @dataclass

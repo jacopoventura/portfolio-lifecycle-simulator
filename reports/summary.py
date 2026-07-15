@@ -718,27 +718,54 @@ def print_plan_check(
 
     # ── INCOME pillar ─────────────────────────────────────────────────────────
     conf_word = "with" if income_ok else "with only"
-    _pillar("✓" if income_ok else "✗", "INCOME",
-            f"You can fund €{format_currency(target_today)}/mo from {retire_year} "
-            f"{conf_word} {income_p * 100:.1f}% confidence")
-    line = f"(min: {target_pct}%)."
+    mark = "✓" if income_ok else "✗"
+    p50_mix_s: int | None = None  # reached P50 stock share; reused by the legend
     if income_bar > 0:
-        # Same units as the MC outcome line below (today's €); the nominal
-        # figure is kept in parens because the evidence tables use 2042 prices.
-        if infl_factor > 0:
-            line += (f" Wealth needed: {format_millions(income_bar / infl_factor)} "
-                     f"today's € ({format_millions(income_bar)} at {retire_year} prices).")
-        else:
-            line += f" Wealth needed: {format_millions(income_bar)}."
-    _pillar_cont(line)
+        _pillar(mark, "INCOME",
+                f"Wealth needed to fund today's €{format_currency(target_today)}/mo "
+                f"from {retire_year}")
+        _pillar_cont(f"with {stock_pct}/{bonds_pct} stocks/bonds: "
+                     f"{format_millions(income_bar)} in IT.")
+    else:
+        _pillar(mark, "INCOME",
+                f"You can fund €{format_currency(target_today)}/mo from {retire_year} "
+                f"{conf_word} {income_p * 100:.1f}% confidence (min: {target_pct}%).")
     if len(mc_today) == 3:
         # MC of the CURRENT situation: today's portfolio + current contribution
         # split, no levers applied (run_monte_carlo_simulation with the
         # current_stock_mo/current_bonds_mo overrides).
-        _pillar_cont(f"Current plan outcome (MC, today's €): "
-                     f"P{tail_key} {format_millions(mc_today[tail_key])} · "
-                     f"P50 {format_millions(mc_today[50])} · "
-                     f"P{target_pct} {format_millions(mc_today[target_pct])}.")
+        # Sleeve percentiles are computed independently, so the stocks and
+        # bonds rows need not sum exactly to the total row.
+        keys = (tail_key, 50, target_pct)
+        stock_today = {k: mc.final_stock_percentiles[k] / infl_factor
+                       for k in keys if k in mc.final_stock_percentiles}
+        bond_today = {k: mc.final_bond_percentiles[k] / infl_factor
+                      for k in keys if k in mc.final_bond_percentiles}
+        have_sleeves = len(stock_today) == 3 and len(bond_today) == 3
+        _pillar_cont("Current plan outcome (MC, today's €):")
+        _pillar_cont("  " + " " * 7 + "".join(f"{'P' + str(k):>9}" for k in keys))
+        if have_sleeves:
+            _pillar_cont("  " + f"{'stocks':<7}"
+                         + "".join(f"{format_millions(stock_today[k]):>9}" for k in keys))
+            _pillar_cont("  " + f"{'bonds':<7}"
+                         + "".join(f"{format_millions(bond_today[k]):>9}" for k in keys))
+        _pillar_cont("  " + f"{'total':<7}"
+                     + "".join(f"{format_millions(mc_today[k]):>9}" for k in keys))
+        mix_line = ""
+        if have_sleeves:
+            p50_total = stock_today[50] + bond_today[50]
+            if p50_total > 0:
+                p50_mix_s = int(round(100.0 * stock_today[50] / p50_total))
+                mix_line = (f"reaching a {p50_mix_s}% stocks / {100 - p50_mix_s}% bonds "
+                            f"distribution (P50).")
+        if income_bar > 0:
+            # Conclusion: the confidence sentence, placed after the evidence.
+            _pillar_cont(f"The required today's €{format_currency(target_today)}/mo in "
+                         f"{retire_year} can be reached {conf_word}")
+            _pillar_cont(f"{income_p * 100:.1f}% confidence (min: {target_pct}%) "
+                         f"with the current plan" + ("," if mix_line else "."))
+            if mix_line:
+                _pillar_cont(mix_line)
 
     # Mix risk — the composition test (stocks AND bonds each reach their 50/50
     # quota). Income can pass while this fails: bonds/cash overshoot compensates
@@ -768,6 +795,13 @@ def print_plan_check(
             _pillar("✗", "PRESERVATION",
                     f"Spending €{format_currency(target_today)}/mo from {retire_year} depletes "
                     f"real wealth over {decum_summary.n_years}y.")
+            p50_end = decum_summary.p50_final_real_wealth
+            p50_ratio = decum_summary.p50_final_real_ratio
+            if p50_end is not None:
+                start = (f" of the {format_millions(p50_end / p50_ratio)} start"
+                         if p50_ratio else "")
+                _pillar_cont(f"P50 remaining after {decum_summary.n_years}y: "
+                             f"{format_millions(p50_end)}{start} ({retire_year} prices).")
             if max_safe is not None:
                 gap = target_today - max_safe
                 _pillar_cont(f"Max spend that keeps ≥{preserve_pct}% real wealth: "
@@ -778,6 +812,16 @@ def print_plan_check(
             else:
                 _pillar_cont("No retirement year within the tradeoff window closes it "
                              "at current saving.")
+        # State the pension assumption explicitly — it props up every
+        # preservation number above from the year it starts.
+        pension_mo = config.mc_decumulation_pension_monthly
+        if pension_mo > 0:
+            pension_year = retire_year + config.mc_decumulation_pension_start_year
+            adj = config.mc_decumulation_pension_adjustment_rate * 100
+            _pillar_cont(f"Assumes net pension €{format_currency(pension_mo)}/mo "
+                         f"from {pension_year} ({retire_year} prices, {adj:+.1f}%/yr).")
+        else:
+            _pillar_cont("Assumes no pension income.")
 
     # ── RETURN pillar ─────────────────────────────────────────────────────────
     if cape is None:
@@ -905,21 +949,30 @@ def print_plan_check(
 
     # ── Three-numbers legend ──────────────────────────────────────────────────
     print()
-    print("  THREE WEALTH NUMBERS BELOW — don't confuse them (all today's €; "
-          f"evidence tables use {retire_year} prices):")
-    if income_bar > 0 and infl_factor > 0:
-        print(f"    {format_millions(income_bar / infl_factor):<8} income min        "
-              f"yield covers €{format_currency(target_today)}/mo; may deplete "
-              f"(= {format_millions(income_bar)} in tables)")
-    if 50 in mc_today:
-        print(f"    {format_millions(mc_today[50]):<8} plan P50 (MC)     "
-              f"typical wealth the current plan reaches by {retire_year}")
+    print(f"  THREE WEALTH NUMBERS BELOW — don't confuse them "
+          f"(all at {retire_year} prices; today's € in parentheses):")
+    if income_bar > 0:
+        nominal_mo = target_today * infl_factor
+        print(f"    {format_millions(income_bar):<8} income min        "
+              f"covers the required net €{format_currency(nominal_mo)}/mo at "
+              f"{retire_year} (€{format_currency(target_today)} today) "
+              f"with {stock_pct}/{bonds_pct} stocks/bonds")
+    if 50 in mc_pcts and infl_factor > 0:
+        # ≈ because the blended net rate is computed at the wished mix, while
+        # the P50 outcome lands on the reached mix — close, not identical.
+        p50_nom = mc_pcts[50]
+        gen_mo = p50_nom * mc.portfolio_net_income_rate / 12.0
+        reached = (f" with {p50_mix_s}/{100 - p50_mix_s} stocks/bonds"
+                   if p50_mix_s is not None else "")
+        print(f"    {format_millions(p50_nom):<8} plan P50 (MC)     "
+              f"generates ≈€{format_currency(gen_mo)}/mo "
+              f"(≈€{format_currency(gen_mo / infl_factor)} today){reached}")
     if decum_summary is not None and infl_factor > 0:
         pres = decum_summary.required_portfolio_fi_canonical
-        print(f"    {format_millions(pres / infl_factor):<8} "
+        print(f"    {format_millions(pres):<8} "
               f"preservation min  keeps ≥{preserve_pct}% real wealth to "
               f"{retire_year + decum_summary.n_years} "
-              f"(= {format_millions(pres)} in tables)")
+              f"({format_millions(pres / infl_factor)} today)")
 
     # ── Glossary ──────────────────────────────────────────────────────────────
     print()

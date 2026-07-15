@@ -1,4 +1,5 @@
 from models import (
+    Config,
     DecumInflationCagrCell,
     DecumInflationCagrGrid,
     FocusedPreservationTable,
@@ -146,9 +147,23 @@ def print_focused_takeaway(
     table: FocusedPreservationTable,
     *,
     tradeoff: "YearsToRetirementTradeoff | None" = None,
+    config: "Config | None" = None,
 ) -> None:
     """End-of-report bottom line: years-to-retirement tradeoff table plus the
     IT-required-portfolio stats block. Designed to be the LAST block printed."""
+    if config is not None:
+        import datetime
+        retire_year = datetime.date.today().year + int(round(config.years))
+        pension_mo = config.mc_decumulation_pension_monthly
+        if pension_mo > 0:
+            pension_year = retire_year + config.mc_decumulation_pension_start_year
+            adj = config.mc_decumulation_pension_adjustment_rate * 100
+            print(f"  All decumulation numbers assume a net pension of "
+                  f"€{format_currency(pension_mo)}/mo from {pension_year} "
+                  f"({retire_year} prices, {adj:+.1f}%/yr).")
+        else:
+            print("  All decumulation numbers assume no pension income.")
+        print()
     conf_pct = int(round(table.confidence * 100))
     preserve_pct = int(round(table.preserve_ratio * 100))
 

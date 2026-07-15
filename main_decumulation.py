@@ -154,7 +154,7 @@ def main(
         print_wealth_preservation_under_sorr(wealth_surface)
 
     # ── Takeaway (always printed; LAST block) ────────────────────────────────
-    print_focused_takeaway(focused, tradeoff=tradeoff)
+    print_focused_takeaway(focused, tradeoff=tradeoff, config=config)
 
     # For the final verdict (Lever B): first tradeoff row where Max safe WD
     # in today's € meets the user's target spend in today's €.
@@ -181,6 +181,8 @@ def main(
         tradeoff_first_safe_year_from_now=first_safe.years_to_retirement if first_safe else None,
         tradeoff_first_safe_wd_today=first_safe.max_safe_monthly_today_eur if first_safe else None,
         max_safe_wd_at_plan_horizon_today=plan_row.max_safe_monthly_today_eur if plan_row else None,
+        p50_final_real_wealth=focused.it_required_portfolio * focused.p50_real_final_at_it_required,
+        p50_final_real_ratio=focused.p50_real_final_at_it_required,
     )
 
 
