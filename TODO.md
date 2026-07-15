@@ -10,7 +10,7 @@ Where the scope is genuinely under-served:
 ## Done
 
   2. ~~Top-line verdict~~ — FINAL VERDICT block now shows cross-pillar dashboard (Accumulation / Preservation / CAGR realism with ✓/✗), one-liner verdict with primary gap + primary lever, then detailed levers A/B/C. (2026-05-27)
-  4. ~~Fat-tail risk modeling~~ — block bootstrap MC added (`mc_return_method = "bootstrap"`). Circular block bootstrap from 99 years of spliced S&P 500 total returns (SPY 1993+ / GSPC pre-1993 with dividend adjustment). Captures real crash clustering, volatility regimes, fat tails. Mean-shifted to planning CAGR. Parametric mode remains default. (2026-05-27)
+  4. ~~Fat-tail risk modeling~~ — block bootstrap MC added (`mc_return_method = "bootstrap"`). Circular block bootstrap from 99 years of spliced S&P 500 total returns (SPY 1993+ / GSPC pre-1993 with dividend adjustment). Captures real crash clustering, volatility regimes, fat tails. Mean-shifted to planning CAGR. Bootstrap is the active method in config.toml; "parametric" remains available. (2026-05-27) — Last Gaussian holdout closed 2026-07-15: the CAGR-analysis two-phase lost-decade stress test now block-resamples the era's real annual returns (was Gaussian mean/σ draws), and the take-away table gained a historical DCA anchor row (same lump+monthly cash-flow profile as the DCA MC row) for validation.
 ## Nice to have
 
 - GUI / web frontend

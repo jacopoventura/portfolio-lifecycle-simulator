@@ -1727,6 +1727,99 @@ def _era_stats(prices: pd.Series, start: str | None, end: str | None) -> dict:
     }
 
 
+def _era_annual_returns(prices: pd.Series, start: str, end: str) -> np.ndarray:
+    """Calendar-year returns of the era [start, end). Pass `start` one year
+    early so pct_change has a base for the era's first year."""
+    s = prices[(prices.index >= pd.Timestamp(start)) & (prices.index < pd.Timestamp(end))]
+    if len(s) < 20:
+        return np.empty(0)
+    yearly = s.resample("YE").last().dropna()
+    return yearly.pct_change().dropna().values.astype(np.float64)
+
+
+def _block_resample(
+    rng: np.random.Generator,
+    pool: np.ndarray,
+    n_simulations: int,
+    years: int,
+    block_size: int,
+) -> np.ndarray:
+    """Circular block bootstrap for the small era pools of the two-phase
+    stress test. Same sampling as bootstrap.block_bootstrap_returns but
+    without its ≥10-observation guard: these pools are one era each
+    (~8-10 annual returns) by construction, and the phase structure —
+    not pool size — carries the scenario's meaning."""
+    n_obs = len(pool)
+    block = max(1, min(block_size, n_obs))
+    n_blocks = int(np.ceil(years / block))
+    starts = rng.integers(0, n_obs, size=(n_simulations, n_blocks))
+    idx = (starts[:, :, np.newaxis] + np.arange(block)[np.newaxis, np.newaxis, :]) % n_obs
+    return np.maximum(pool[idx.reshape(n_simulations, -1)][:, :years], -0.99)
+
+
+def _era_dca_irr_stats(
+    prices: pd.Series,
+    start: str,
+    end: str | None,
+    initial_stock: float = 0.0,
+    monthly_contribution: float = 100.0,
+) -> dict:
+    """Money-weighted IRR over the era for the same cash-flow profile as the
+    DCA MC stress test — an initial lump at entry plus fixed monthly
+    contributions — for each entry day in the era's first year (same entry-day
+    spread as _era_rolling_stats). This is the historical anchor the DCA MC
+    row validates against, so the profiles must match."""
+    _null = {"irr_p5": None, "irr_p50": None, "yr_from": None, "yr_to": None}
+    s = prices.copy()
+    s = s[s.index >= pd.Timestamp(start)]
+    if end:
+        s = s[s.index < pd.Timestamp(end)]
+    if len(s) < 260:
+        return _null
+    idx = s.index
+    final_price = float(s.iloc[-1])
+    final_date = idx[-1]
+    contribution = monthly_contribution
+
+    year_one_end = idx[0] + pd.DateOffset(years=1)
+    entry_days = idx[idx < year_one_end]
+
+    irrs: list[float] = []
+    for day in entry_days:
+        buy_targets = pd.date_range(day, final_date, freq=pd.DateOffset(months=1))
+        pos = idx.searchsorted(buy_targets)
+        pos = pos[pos < len(idx)]
+        if len(pos) < 12:
+            continue
+        prices_at_buy = s.iloc[pos].to_numpy(dtype=float)
+        units = (contribution / prices_at_buy).sum()
+        units += initial_stock / prices_at_buy[0]
+        fv = units * final_price
+        # Years each cash flow stayed invested, then bisect the annual rate r
+        # solving p0·(1+r)^T + sum(C·(1+r)^t) == fv (monotonic in r).
+        t = (final_date - idx[pos]).days.to_numpy(dtype=float) / 365.25
+        t0 = t[0]
+        lo, hi = -0.99, 5.0
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            proj = initial_stock * (1.0 + mid) ** t0 + (contribution * (1.0 + mid) ** t).sum()
+            if proj < fv:
+                lo = mid
+            else:
+                hi = mid
+        irrs.append(0.5 * (lo + hi))
+
+    if not irrs:
+        return _null
+    arr = np.asarray(irrs)
+    return {
+        "irr_p5": float(np.percentile(arr, 5)),
+        "irr_p50": float(np.percentile(arr, 50)),
+        "yr_from": idx[0].year,
+        "yr_to": final_date.year,
+    }
+
+
 def _era_rolling_stats(prices: pd.Series, start: str | None, end: str | None) -> dict:
     """p5/p10/p50/p90 of CAGR, MDD, and vol across all entry days in the first year of the era."""
     _null = {k: None for k in (
@@ -1837,7 +1930,8 @@ def print_forward_cagr_estimates(
     monthly_contribution: float = 0.0,
     verbose: bool = True,
 ) -> dict:
-    """CAPE-implied forward CAGR + two-phase lost-decade Monte Carlo stress test.
+    """CAPE-implied forward CAGR + two-phase lost-decade stress test (circular
+    block bootstrap of the era's real annual returns — not Gaussian draws).
     Always computes; printing is gated by `verbose`. Returns a dict of key metrics
     for downstream consumers (e.g. the take-away recap)."""
     summary: dict = {}
@@ -1892,19 +1986,23 @@ def print_forward_cagr_estimates(
     if lost["cagr"] is None or rec["cagr"] is None:
         return summary
 
-    # Geometric → arithmetic mean:  arithmetic ≈ geometric + σ²/2
-    phase1_mean = lost["cagr"] + 0.5 * lost["vol"] ** 2
-    phase2_mean = rec["cagr"]  + 0.5 * rec["vol"]  ** 2
-    phase1_std  = lost["vol"]
-    phase2_std  = rec["vol"]
     phase1_yrs  = min(10, horizon_years)
     phase2_yrs  = max(0, horizon_years - phase1_yrs)
 
+    # Block-bootstrap pools: the era's actual calendar-year returns (start one
+    # year early to give pct_change its base). Resampling real returns keeps
+    # fat tails and clustering — no Gaussian assumption, no geometric→arithmetic
+    # mean correction needed.
+    lost_pool = _era_annual_returns(sp500_prices, "1999-01-01", "2010-01-01")
+    rec_pool  = _era_annual_returns(sp500_prices, "2008-01-01", rec_end)
+    if len(lost_pool) < 5 or (phase2_yrs > 0 and len(rec_pool) < 3):
+        return summary
+
     rng = np.random.default_rng(42)
-    r1  = np.maximum(rng.normal(phase1_mean, phase1_std, (n_simulations, phase1_yrs)), -0.99)
+    r1  = _block_resample(rng, lost_pool, n_simulations, phase1_yrs, block_size=5)
     fv  = np.prod(1.0 + r1, axis=1)
     if phase2_yrs > 0:
-        r2  = np.maximum(rng.normal(phase2_mean, phase2_std, (n_simulations, phase2_yrs)), -0.99)
+        r2  = _block_resample(rng, rec_pool, n_simulations, phase2_yrs, block_size=5)
         fv  = fv * np.prod(1.0 + r2, axis=1)
     cagrs = fv ** (1.0 / horizon_years) - 1.0
 
@@ -1920,14 +2018,14 @@ def print_forward_cagr_estimates(
     summary["lump_prob_5pct"] = prob_above5
 
     if verbose:
-        print("  Two-phase stress test  (S&P 500 as equity proxy, native USD):")
+        print("  Two-phase stress test  (block bootstrap of S&P 500 era returns, native USD):")
         print(f"    Phase 1 — {phase1_yrs:2d}yr lost decade : "
-              f"mean={phase1_mean * 100:+.1f}%  σ={phase1_std * 100:.1f}%"
-              f"  ({lost['yr_from']}–{lost['yr_to']})")
+              f"era CAGR {lost['cagr'] * 100:+.1f}%  σ={lost['vol'] * 100:.1f}%"
+              f"  ({lost['yr_from']}–{lost['yr_to']}, pool {len(lost_pool)}y)")
         if phase2_yrs > 0:
             print(f"    Phase 2 — {phase2_yrs:2d}yr recovery    : "
-                  f"mean={phase2_mean * 100:+.1f}%  σ={phase2_std * 100:.1f}%"
-                  f"  ({rec['yr_from']}–{rec['yr_to']})")
+                  f"era CAGR {rec['cagr'] * 100:+.1f}%  σ={rec['vol'] * 100:.1f}%"
+                  f"  ({rec['yr_from']}–{rec['yr_to']}, pool {len(rec_pool)}y)")
         print(f"    {n_simulations:,} simulations  |  total horizon {horizon_years}yr")
         print(f"    {'─' * 38}")
         print(f"    P5  CAGR : {p5  * 100:.1f}%   (worst 5% of outcomes)")
@@ -1949,13 +2047,9 @@ def print_forward_cagr_estimates(
         # Simulate portfolio year-by-year; contributions arrive monthly, so use
         # the annuity FV formula for each year's cash flows.
         rng2 = np.random.default_rng(43)
-        r1_dca = np.maximum(
-            rng2.normal(phase1_mean, phase1_std, (n_simulations, phase1_yrs)), -0.99
-        )
+        r1_dca = _block_resample(rng2, lost_pool, n_simulations, phase1_yrs, block_size=5)
         r2_dca = (
-            np.maximum(
-                rng2.normal(phase2_mean, phase2_std, (n_simulations, phase2_yrs)), -0.99
-            )
+            _block_resample(rng2, rec_pool, n_simulations, phase2_yrs, block_size=5)
             if phase2_yrs > 0
             else np.empty((n_simulations, 0))
         )
@@ -2019,6 +2113,20 @@ def print_forward_cagr_estimates(
         summary["dca_p50_pl_k"]       = pl50
         summary["dca_p95_pl_k"]       = pl95
         summary["dca_total_invested"] = total_invested
+
+        # Historical anchor with the SAME cash-flow profile (initial lump +
+        # monthly contributions) over the same era — what actually happened,
+        # for the take-away table to validate the MC rows against.
+        dca_hist = _era_dca_irr_stats(
+            sp500_prices, "2000-01-01", rec_end,
+            initial_stock=initial_stock,
+            monthly_contribution=monthly_contribution,
+        )
+        if dca_hist["irr_p5"] is not None:
+            summary["dca_hist_p5"]      = dca_hist["irr_p5"]
+            summary["dca_hist_p50"]     = dca_hist["irr_p50"]
+            summary["dca_hist_yr_from"] = dca_hist["yr_from"]
+            summary["dca_hist_yr_to"]   = dca_hist["yr_to"]
 
         if verbose:
             print("  DCA stress test  (same two-phase scenario + monthly contributions):")
@@ -2124,6 +2232,16 @@ def print_take_away(
         if era3["cagr_p5"] is not None:
             rows.append(("S&P 500  EUR", f"{era3['yr_from']}–{era3['yr_to']}",
                          era3["cagr_p5"], era3["cagr_p50"]))
+    # Historical DCA anchor: the MC's exact cash-flow profile (initial lump +
+    # monthly contributions) run through the actual era — the validation
+    # counterpart of the DCA MC row, exactly as the 2000-{2000+horizon} row
+    # anchors the lump-sum MC. Computed in print_forward_cagr_estimates.
+    hp5  = forward_summary.get("dca_hist_p5")  if forward_summary else None
+    hp50 = forward_summary.get("dca_hist_p50") if forward_summary else None
+    if hp5 is not None and hp50 is not None:
+        rows.append(("DCA      historical",
+                     f"{forward_summary['dca_hist_yr_from']}–{forward_summary['dca_hist_yr_to']}",
+                     hp5, hp50))
 
     # Label the MC scenario by the historical era it samples from (2000-onwards),
     # not by forward calendar years — makes the rows directly comparable to the
@@ -2147,13 +2265,21 @@ def print_take_away(
             print(f"     {src:<22}  {period:<13}"
                   f"  {p5v*100:>+5.1f}%  {p50v*100:>+5.1f}%")
         print()
-        print("     P50s matching across historical and MC rows validates the model:")
-        print("     the MC's median outcome reproduces the lost-decade-plus-recovery")
-        print("     historical CAGR. The MC's tail (P5) tells you what the distribution")
-        print("     of possible 2000-2015-like sequences looks like, not just the one")
-        print("     we actually got. Historical P5 is narrow because all 2000 entries")
-        print("     land near the same point by 2015; MC P5 is wide because Gaussian")
-        print("     resampling produces many alternative sequences with the same mean+σ.")
+        print("     How to read this table:")
+        print("     • P50 = typical outcome · P5 = bad luck (1 in 20 does worse).")
+        print("     • Historical rows = the one path that actually happened. Starting")
+        print("       in 2000 is the worst modern era for this horizon. P5 ≈ P50 there")
+        print("       because only the entry day varies — one path can't show luck.")
+        print("     • The EUR row flatters: its data starts 2003, after the crash.")
+        print("     • 'DCA historical' = your cash-flow profile (existing portfolio +")
+        print("       monthly buying) through that same era. It beats lump-sum because")
+        print("       the monthly buys picked up the crash years cheap.")
+        print("     • 'MC' rows = the same era replayed thousands of times with its")
+        print("       real yearly returns reshuffled (crashes stay clustered). MC P50 ≈")
+        print("       historical P50 proves the replay is faithful; MC P5 shows how bad")
+        print("       the same era could have been in a crueler order.")
+        print("     • Takeaway: compare the DCA rows against the lump-sum rows — the")
+        print("       ongoing monthly saving, not the market, is what protects the plan.")
         print()
 
     # ── 2. Optimal portfolio summary table ───────────────────────────────────
