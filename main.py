@@ -12,7 +12,8 @@ sections:
   S4. AI AGENT      — action plan integrating all sections (opt-in via --agent)
 
 Usage:
-  python main.py                     # sections 1→2→3 (no AI call)
+  python main.py                     # parameter dialog, then sections 1→2→3 (no AI call)
+  python main.py --no-gui            # skip the parameter dialog, use config.toml as-is
   python main.py --agent             # full pipeline including AI agent (section 4)
   python main.py --from decum        # start from decumulation (uses config values for p50/tail)
   python main.py --from cagr         # CAGR only
@@ -456,7 +457,18 @@ def main() -> None:
     parser.add_argument("--cagr", default=None,
                         help="override stock CAGR for all sections "
                              "(accepts 4, 4.0, 0.04, '4%%'); propagated to sub-scripts")
+    parser.add_argument("--no-gui", action="store_true",
+                        help="skip the parameter dialog and run with config.toml as-is")
     args = parser.parse_args()
+
+    if not args.no_gui:
+        try:
+            from settings_gui import edit_settings
+            if not edit_settings(Path("config.toml")):
+                print("Cancelled — no simulation run.")
+                return
+        except Exception as exc:  # headless / tkinter unavailable
+            print(f"(parameter dialog unavailable: {exc} — running with config.toml as-is)")
 
     from reports.formatters import clear_terminal, format_millions
     clear_terminal()
