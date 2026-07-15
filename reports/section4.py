@@ -93,7 +93,10 @@ def print_focused_preservation_table(table: FocusedPreservationTable) -> None:
     print()
 
 
-def print_years_to_retirement_tradeoff(t: YearsToRetirementTradeoff) -> None:
+def print_years_to_retirement_tradeoff(
+    t: YearsToRetirementTradeoff,
+    config: Config | None = None,
+) -> None:
     """Sensitivity table: how preservation outcomes vary with retirement year.
 
     Columns:
@@ -108,9 +111,20 @@ def print_years_to_retirement_tradeoff(t: YearsToRetirementTradeoff) -> None:
     preserve_pct = int(round(t.preserve_ratio * 100))
     _print_subsection(f"When can I retire: Years-to-retirement tradeoff (target spend = €{format_currency(t.target_monthly_today_eur)}/mo today's €)")
     print()
+    print("    Core question: \"If I keep saving exactly as today and retire N years")
+    print("    from now, what does retirement look like?\"")
+    if config is not None and config.mc_decumulation_pension_monthly > 0:
+        # Pension start is anchored to each row's retirement date (not to a
+        # fixed age), so early rows receive it unrealistically early and late
+        # rows unrealistically late.
+        print(f"    Each row includes the net pension: "
+              f"€{format_currency(config.mc_decumulation_pension_monthly)}/mo from "
+              f"{config.mc_decumulation_pension_start_year}y after that row's retirement "
+              f"({config.mc_decumulation_pension_adjustment_rate * 100:+.1f}%/yr).")
+    print()
     print(f"    {'Yrs':>3}  {'P50 Portfolio €':>17}  "
           f"{'P50 stock gain':>14}  {'P50 stock gain €':>17}  "
-          f"{'Max safe WD (today €/mo)':>26}  "
+          f"{'Max safe WD** (today €/mo)':>26}  "
           f"{'P50 final*':>10}  {'P5 final*':>9}  "
           f"{'30y decrement €':>17}")
     print("    " + "─" * 134)
@@ -130,13 +144,14 @@ def print_years_to_retirement_tradeoff(t: YearsToRetirementTradeoff) -> None:
               f"{dec_str:>17}")
     print()
     print(f"    * = withdrawal of today's target income (€{format_currency(t.target_monthly_today_eur)}/mo)")
+    print(f"    ** = spend that ensures ≥{preserve_pct}% of real capital after that row's "
+          f"decum horizon (to age {t.lifespan_age}) with {conf_pct}% probability")
     print()
     print(f"    Notes")
     print(f"    • 'P50 Portfolio €' = MC P50 (median) accumulation wealth at that horizon, today's €.")
     print(f"      Median of the actually-reachable distribution — not the deterministic upper-bias path.")
     print(f"    • 'P50 stock gain' (% and €) = (MC P50 stock at year N − nominal money invested in stocks).")
     print(f"      Nominal (not inflation-adjusted) — same basis as the accumulation takeaway.")
-    print(f"    • 'Max safe WD' = back-solved real €/mo (today's €) at which P(preserve ≥{preserve_pct}%) ≥ {conf_pct}%.")
     print(f"    • 'P50/P5 final*' = real final wealth as % of P50 Portfolio, at end of each row's natural decum horizon.")
     print(f"    • '30y decrement €' = P50 Portfolio − P50 wealth after a fixed 30y decum (today's €), withdrawing target spend.")
     print(f"      Apples-to-apples across rows. Negative = portfolio grew in real terms over 30y.")
@@ -200,12 +215,10 @@ def print_focused_takeaway(
           f"€{format_currency(max_wd_eur)}/mo today's €  ({max_wd_pct:.2f}% WR)")
     print(f"    Wealth needed for €{format_currency(table.real_monthly_withdrawal)}/mo income AND ≥{preserve_pct}% preservation : "
           f"€{format_currency(table.q3_required_wealth)}  ({q3_best_bonds_pct}% bonds / {q3_best_stocks_pct}% stocks, {conf_pct}% conf)")
-    print(f"  Reference — IT projected portfolio (plan delivers): "
-          f"€{format_currency(table.it_projected_portfolio)}")
     print()
 
     if tradeoff is not None:
-        print_years_to_retirement_tradeoff(tradeoff)
+        print_years_to_retirement_tradeoff(tradeoff, config=config)
 
 
 def _milestone_years(horizon: int, pension_start: int) -> tuple[int, int]:

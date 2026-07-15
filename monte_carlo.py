@@ -285,6 +285,11 @@ def run_monte_carlo_simulation(
     base_stock_contrib = monthly_stock_contribution_override if monthly_stock_contribution_override is not None else scenario.required_monthly_contribution
     base_bond_contrib = monthly_bonds_contribution_override if monthly_bonds_contribution_override is not None else scenario.required_monthly_bonds_contribution
 
+    # Cost basis for the per-path taxable-gain fraction of the income test.
+    # An initial_stock_override above the current holding is new money bought
+    # at cost, so the unrealized gain carries over unchanged.
+    cost_basis = max(0.0, initial_stock - config.current_stock_unrealized_gain)
+
     for year in range(years):
         stock_fv_factor, stock_annuity = _vec_annuity_factor(mc.annual_stock_returns[:, year])
         bond_fv_factor, bond_annuity = _vec_annuity_factor(mc.annual_bond_yields[:, year])
@@ -295,6 +300,7 @@ def run_monte_carlo_simulation(
         stock_values = stock_values * stock_fv_factor + c_stock * stock_annuity
         bond_values = bond_values * bond_fv_factor + c_bond * bond_annuity
         cash_values = cash_values * mc.cash_fv_factor + c_cash * mc.cash_annuity
+        cost_basis += c_stock * 12
 
     cash_converted = np.maximum(0.0, cash_values - config.cash_reserve_at_horizon)
     bond_values += cash_converted
@@ -314,9 +320,16 @@ def run_monte_carlo_simulation(
 
     s_frac = np.where(final_portfolios > 0, stock_values / final_portfolios, 0.0)
     b_frac = np.where(final_portfolios > 0, bond_values / final_portfolios, 0.0)
+    # Per-path taxable-gain fraction and final-year simulated bond yield —
+    # same accounting as compute_years_to_financial_freedom_mc, so the
+    # headline income rate and the "reaches X% in" year agree by construction.
+    gain = np.maximum(0.0, stock_values - cost_basis)
+    gain_frac = np.where(stock_values > 0, gain / stock_values, 0.0)
+    eff_stock_tax = gain_frac * scenario.stock_teilfreistellung * scenario.stock_tax_rate
+    final_bond_yield = mc.annual_bond_yields[:, years - 1] if years > 0 else scenario.yield_bonds
     actual_net_rate = (
-        s_frac * scenario.withdrawal_rate * (1.0 - scenario.effective_stock_tax_rate)
-        + b_frac * scenario.yield_bonds * (1.0 - scenario.bond_tax_rate)
+        s_frac * scenario.withdrawal_rate * (1.0 - eff_stock_tax)
+        + b_frac * final_bond_yield * (1.0 - scenario.bond_tax_rate)
     )
     success_income = final_portfolios * actual_net_rate >= target_annual
 

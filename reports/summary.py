@@ -467,10 +467,10 @@ def print_takeaway(
               f"  · income {flag_i} {mc.success_rate_income_only * 100:>4.1f}%")
         # Sub-row: years needed at current contributions.
         #   portfolio  = stocks AND bonds each ≥ required allocation (Q1 sense)
-        #   net income = portfolio income ≥ target, with year-specific
-        #                taxable-gain accounting via ff (more accurate than
-        #                the constant effective_stock_tax_rate used in
-        #                years_to_targets.years_to_income).
+        #   net income = portfolio income ≥ target, per-path taxable-gain
+        #                accounting via ff — same model as the headline
+        #                success_rate_income_only, so the ✓/✗ above and this
+        #                year agree (modulo simulation-count noise).
         # Both use the *income-formula* FI bar (W₀ ≈ target/yield); the
         # preservation-calibrated answer lives in decum's tradeoff table.
         if yrs_target is not None or ff is not None:
