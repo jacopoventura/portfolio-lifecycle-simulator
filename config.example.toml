@@ -1,0 +1,115 @@
+# ==============================================================================
+# Template config — safe to commit, contains no personal financial data.
+#
+# Setup:
+#   cp config.example.toml config.toml
+# then edit the placeholder values below (marked "<-- EDIT ME") in config.toml
+# with your real numbers. config.toml is gitignored, so it stays local only.
+# ==============================================================================
+
+# Scenario
+target_monthly_retirement_income = 2500.0  # <-- EDIT ME: monthly income in retirement (today's money)
+years = 20   # <-- EDIT ME: investment horizon in years
+expected_inflation_percent = 2.3
+expected_yearly_growth_stocks_percent = 6  # net of TER (baseline / "optimistic" assumption)
+# To plan with a different CAGR (e.g. when CAPE realism flags 6% as optimistic),
+# pass --cagr 4 on the command line; not a config setting (per-run only).
+bonds_percentage = 50.0
+yield_bonds = 3.1
+withdrawal_percentage_stock = 2.8
+tax_rate = 0.26
+tax_rate_bond_italy = 0.125
+
+# Current Assets
+current_stock_value = 0.0            # <-- EDIT ME
+current_bonds_value = 0.0            # <-- EDIT ME
+current_stock_unrealized_gain = 0.0  # <-- EDIT ME
+current_cash = 0.0                   # <-- EDIT ME
+cash_reserve_at_horizon = 0.0  # <-- EDIT ME: cash kept at horizon, rest converted to bonds
+interest_on_cash_pa = 2.0
+annual_net_saving = 0.0        # <-- EDIT ME
+annual_contribution_growth_percent = 1.8  # yearly step-up on monthly contributions
+stock_monthly_investment_pct = 0.6
+bonds_monthly_investment_pct = 0.25
+basiszins = 0.0229        # 2.29% (2025 value)
+freibetrag = 2000.0       # €2,000 saver's allowance (couple)
+teilfreistellung = 0.7    # 70% for equity ETFs, 85% for mixed funds, 100% for bond funds
+
+# Optimal allocation grid search
+optimize_grid_step = 50000.0   # cash redeployment step size in €
+
+# Monte Carlo
+mc_n_simulations = 50000
+mc_stock_return_std_percent = 15.0
+mc_inflation_std_percent = 2.0
+mc_bond_yield_std_percent = 1.0   # ann. std of yield innovations (~hist. EUR 10y ≈ 80–100 bps)
+mc_target_success_percent = 95  # integer, e.g. 90, 95, 99
+mc_grid_cagr_min = 0.03        # minimum CAGR shown in grid tables
+mc_grid_cagr_max = 0.09        # maximum CAGR shown in grid tables
+mc_grid_cagr_step = 0.01       # CAGR step size in grid tables
+mc_inflation_ar1_phi = 0.6     # AR(1) autocorrelation for CPI (0=independent, 0.6=historical)
+mc_grid_n_simulations = 15000  # simulations per cell in contribution/bond grids
+mc_grid_contribution_max = 5000.0  # upper bound on monthly stock contribution in grids (€)
+
+# Decumulation
+# Stock return during decumulation uses expected_yearly_growth_stocks_percent (same asset class,
+# lower portfolio return comes from glide path reducing stock allocation, not a different μ)
+mc_decumulation_years = 30              # withdrawal horizon in years (age 54→94)
+mc_decumulation_n_simulations = 10000  # simulations for decumulation MC
+mc_decumulation_pension_start_year = 15    # years after retirement when pension begins
+mc_decumulation_pension_monthly = 0.0      # <-- EDIT ME: €/mo net pension, nominal at retirement date
+mc_decumulation_pension_adjustment_rate = 0.015    # annual nominal pension growth (0 = fixed nominal, 1.5% = partial CPI)
+mc_decumulation_glide_end_pct = 0.30       # stock% at end of glide path (e.g. age 74)
+mc_decumulation_glide_years = 20           # years to complete glide (e.g. age 54→74)
+
+# Used by decum's Years-to-retirement tradeoff to size per-row decum horizons.
+current_age = 35                            # <-- EDIT ME: today's age; labels candidate retirement years
+lifespan_age = 94                           # planning lifespan; decum horizon = lifespan_age - retirement_age
+
+# Canonical FI required portfolio — the wealth bar accumulation targets.
+# Defined as the smallest starting wealth where, at the optimal allocation,
+# P(final ≥ fi_preservation_ratio × initial) clears both confidence thresholds:
+#   - baseline (random returns)
+#   - worst-SORR (currently the 2000-2002 lost-decade sequence)
+fi_preservation_ratio              = 0.66  # preserve at least 65% of initial real wealth at horizon ("consume gains, preserve cost basis")
+fi_preservation_confidence_baseline = 0.91  # required P under random returns
+fi_preservation_confidence_stress   = 0.50  # required P under the worst-case SORR scenario
+
+# Benchmark indices — fetched, cached, and reported separately from the ETF universe.
+# Longer history than UCITS ETFs; used for plausibilization against broad market returns.
+benchmark_index      = ["^GSPC", "^IXIC", "^STOXX50E"]
+benchmark_start_year = 1971   # truncate all benchmark series to this year before computing rolling stats
+
+# Forward CAGR estimates (printed after era analysis)
+cape_ratio         = 36.0   # current Shiller CAPE — update manually (https://multpl.com/shiller-pe)
+cape_long_run_mean = 17.0   # historical CAPE mean used as reversion target
+cape_eps_growth    = 0.015  # assumed long-run real EPS growth rate
+cape_n_simulations = 50000  # MC paths for the two-phase stress test
+
+# ETF Portfolio Optimiser
+# Tickers to include in optimisation (stock ETFs only — bonds are modelled separately).
+# Must be a subset of TICKERS in main_cagr_analysis.py. Weights are found by the optimizer.
+[etf_optimizer]
+optimize_tickers           = ["IS3R.DE", "IWDA.AS", "VEVE.AS", "QQQ", "XDEQ.DE", "IGLN.L", "TDIV.AS"]
+selected_strategy          = "max_sortino"   # P6 bridge: max_sortino | max_sharpe | min_variance | max_cagr | max_p50_cagr | max_p5_cagr | max_p1_cagr | equal_weight
+max_weight_per_ticker      = 0.60            # no single ETF exceeds this weight
+qqq_max_weight             = 0.20            # QQQ-specific cap (matches agent rule)
+gold_max_weight            = 0.0010            # gold cap — limited role in a growth portfolio
+min_weight_if_included     = 0.05            # positions below this are zeroed out
+min_history_years          = 5.0             # exclude tickers with less data than this
+cardinality_sweep          = true            # sweep k=2..max_k to find optimal portfolio size
+# Omit cardinality_sweep_max_k to sweep every k from 2 to n_eligible (= all k rows).
+# Re-introduce as cardinality_sweep_max_k = N to cap computation if it gets slow.
+bayesian_shrink_mean       = 0.5            # James-Stein mean shrinkage intensity (0=sample, 1=grand mean); used with --advanced-optimization
+
+# Return distribution (P7 + P8 + P9-extra)
+mc_stock_return_df = 5.0            # Student-t degrees of freedom (large = normal, 5 = fat tails)
+mc_stock_bond_correlation = -0.2    # stock/bond return correlation (0=independent, negative=typical hedge)
+mc_stock_return_ar1_phi = -0.25     # AR(1) mean reversion (-0.25 = empirical post-crash recovery)
+mc_stock_mean_uncertainty = 0.015   # epistemic uncertainty on CAGR prior (std in decimal, e.g. 0.015 = ±1.5pp)
+mc_stock_vol_uncertainty = 0.03     # epistemic uncertainty on volatility prior (std in decimal, e.g. 0.03 = ±3pp)
+
+# Block bootstrap — alternative to parametric return generation
+mc_return_method = "bootstrap"     # "parametric" (Student-t + AR1 + Cholesky) or "bootstrap" (block bootstrap from historical S&P 500)
+mc_bootstrap_block_size = 5         # contiguous years per block (circular block bootstrap)
+mc_bootstrap_mean_shift = true      # shift bootstrapped mean to match planning CAGR
