@@ -14,7 +14,7 @@ expected_inflation_percent = 2.3
 bonds_percentage = 50.0
 
 # Current Assets
-current_stock_value = 50000.0
+current_stock_value = 50000
 annual_net_saving = 24000.0
 stock_monthly_investment_pct = 0.6
 """
