@@ -13,3 +13,10 @@ build/
 # Personal financial data — real values live only in your local config.toml.
 # Committed template is config.example.toml.
 config.toml
+
+# Generated run outputs — derived from real config, never commit
+historical_data/last_run_context.txt
+historical_data/last_run_summaries.json
+historical_data/run_history.csv
+historical_data/drift_history.csv
+historical_data/drift_history.png
