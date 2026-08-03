@@ -13,7 +13,10 @@ from models import Config
 from monte_carlo import (
     compute_canonical_fi_required_scan,
     compute_chained_mc,
+    compute_crash_timing_matrix,
     compute_sorr_scenarios,
+    compute_survival_matrix,
+    compute_two_bucket_required_wealth,
     compute_wealth_preservation_under_sorr,
     simulate_decumulation,
 )
@@ -94,6 +97,33 @@ WEALTH_SURFACE_BASELINE_P50  = 0.954000
 WEALTH_SURFACE_BASELINE_P100 = 0.366000
 WEALTH_SURFACE_BRIDGE_P50    = 1_266_763.80
 
+# compute_two_bucket_required_wealth (E3)
+# B* saturates at the default hi=15M ceiling at this fixture's confidence bar —
+# a 100%-equity, zero-withdrawal bucket cannot clear it at any size (fat-tailed
+# 30y return uncertainty caps achievable confidence below the bar). Genuine
+# model property, not a bug — reproduced independently on the user's real
+# config too. Regenerated via tests/_fixture_probe.py.
+TWO_BUCKET_REQUIRED_RETIREMENT = 1_100_366.21
+TWO_BUCKET_REQUIRED_BEQUEST    = 15_000_000.00
+TWO_BUCKET_REQUIRED_TOTAL      = 16_100_366.21
+TWO_BUCKET_SINGLE_POT          = 10_827_563.48
+TWO_BUCKET_REACHABLE           = False
+TWO_BUCKET_WORST_STRESS_LABEL  = "Historical 2000-2002"
+
+# compute_survival_matrix — single point at _PORTFOLIO, current allocation.
+# Regenerated via tests/_fixture_probe.py.
+SURVIVAL_MATRIX_NUM_SCENARIOS = 4
+SURVIVAL_MATRIX_BASELINE_SURV = 1.000000
+SURVIVAL_MATRIX_BASELINE_MED  = 0.447997
+SURVIVAL_MATRIX_WORST_SURV    = 1.000000
+
+# compute_crash_timing_matrix — offsets [0,5,10,15] (fits the fixture's 20y horizon).
+# Regenerated via tests/_fixture_probe.py.
+CRASH_TIMING_CRASH_LABEL   = "Historical 2000-2002"
+CRASH_TIMING_SURVIVAL_YR0  = 1.000000
+CRASH_TIMING_SURVIVAL_YR15 = 1.000000
+CRASH_TIMING_BASELINE_SURV = 1.000000
+
 
 @pytest.fixture(scope="module")
 def config():
@@ -159,3 +189,52 @@ class TestWealthPreservationFixture:
         assert baseline.best_p_by_ratio[0] == pytest.approx(WEALTH_SURFACE_BASELINE_P50, abs=0.02)
         assert baseline.best_p_by_ratio[5] == pytest.approx(WEALTH_SURFACE_BASELINE_P100, abs=0.02)
         assert surface.bridge_p50 == pytest.approx(WEALTH_SURFACE_BRIDGE_P50, rel=0.01)
+
+
+class TestTwoBucketFixture:
+    def test_two_bucket_matches_snapshot(self, config):
+        result = compute_two_bucket_required_wealth(
+            config, _TARGET_MONTHLY, seed=_SEED, n_simulations=_N,
+        )
+        assert result.reachable == TWO_BUCKET_REACHABLE
+        assert result.required_retirement_wealth == pytest.approx(
+            TWO_BUCKET_REQUIRED_RETIREMENT, rel=0.005
+        )
+        assert result.required_bequest_wealth == pytest.approx(
+            TWO_BUCKET_REQUIRED_BEQUEST, rel=0.005
+        )
+        assert result.required_total_wealth == pytest.approx(
+            TWO_BUCKET_REQUIRED_TOTAL, rel=0.005
+        )
+        assert result.single_pot_required_wealth == pytest.approx(
+            TWO_BUCKET_SINGLE_POT, rel=0.005
+        )
+        assert result.worst_stress_label == TWO_BUCKET_WORST_STRESS_LABEL
+
+
+class TestSurvivalMatrixFixture:
+    def test_survival_matrix_matches_snapshot(self, config):
+        matrix = compute_survival_matrix(
+            config, _TARGET_MONTHLY, [("Portfolio", _PORTFOLIO)],
+            seed=_SEED, n_simulations=_N,
+        )
+        assert len(matrix.scenario_labels) == SURVIVAL_MATRIX_NUM_SCENARIOS
+        row = matrix.rows[0]
+        assert row.survival_by_scenario[0] == pytest.approx(SURVIVAL_MATRIX_BASELINE_SURV, abs=0.02)
+        assert row.median_preserved_by_scenario[0] == pytest.approx(
+            SURVIVAL_MATRIX_BASELINE_MED, abs=0.02
+        )
+        assert min(row.survival_by_scenario) == pytest.approx(SURVIVAL_MATRIX_WORST_SURV, abs=0.02)
+
+
+class TestCrashTimingFixture:
+    def test_crash_timing_matches_snapshot(self, config):
+        matrix = compute_crash_timing_matrix(
+            config, _TARGET_MONTHLY, [("Portfolio", _PORTFOLIO)],
+            offsets=[0, 5, 10, 15], seed=_SEED, n_simulations=_N,
+        )
+        row = matrix.rows[0]
+        assert matrix.crash_label == CRASH_TIMING_CRASH_LABEL
+        assert row.survival_by_offset[0] == pytest.approx(CRASH_TIMING_SURVIVAL_YR0, abs=0.02)
+        assert row.survival_by_offset[-1] == pytest.approx(CRASH_TIMING_SURVIVAL_YR15, abs=0.02)
+        assert row.baseline_survival == pytest.approx(CRASH_TIMING_BASELINE_SURV, abs=0.02)

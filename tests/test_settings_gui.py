@@ -70,6 +70,8 @@ class TestValidate:
             "expected_yearly_growth_stocks_percent": 6.0,
             "expected_inflation_percent": 2.3,
             "bonds_percentage": 50.0,
+            "yield_bonds": 3.1,
+            "withdrawal_percentage_stock": 2.8,
             "current_stock_value": 50000.0,
             "current_bonds_value": 10000.0,
             "current_cash": 30000.0,
@@ -91,6 +93,12 @@ class TestValidate:
 
     def test_bonds_percentage_bounds(self):
         assert _validate(self._values(bonds_percentage=101)) is not None
+
+    def test_bond_yield_floor(self):
+        assert _validate(self._values(yield_bonds=-100)) is not None
+
+    def test_withdrawal_rate_must_be_positive(self):
+        assert _validate(self._values(withdrawal_percentage_stock=0)) is not None
 
     def test_saving_shares_must_not_exceed_one(self):
         assert _validate(self._values(

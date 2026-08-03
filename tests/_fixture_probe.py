@@ -7,7 +7,10 @@ from models import Config
 from monte_carlo import (
     compute_canonical_fi_required_scan,
     compute_chained_mc,
+    compute_crash_timing_matrix,
     compute_sorr_scenarios,
+    compute_survival_matrix,
+    compute_two_bucket_required_wealth,
     compute_wealth_preservation_under_sorr,
     simulate_decumulation,
 )
@@ -102,6 +105,35 @@ def main() -> None:
     print(f"WEALTH_SURFACE_BASELINE_P50  = {base_row.best_p_by_ratio[0]:.6f}")
     print(f"WEALTH_SURFACE_BASELINE_P100 = {base_row.best_p_by_ratio[5]:.6f}")
     print(f"WEALTH_SURFACE_BRIDGE_P50    = {surface.bridge_p50:.2f}")
+
+    two_bucket = compute_two_bucket_required_wealth(
+        config, target_monthly, seed=seed, n_simulations=n,
+    )
+    print(f"TWO_BUCKET_REQUIRED_RETIREMENT = {two_bucket.required_retirement_wealth:.2f}")
+    print(f"TWO_BUCKET_REQUIRED_BEQUEST    = {two_bucket.required_bequest_wealth:.2f}")
+    print(f"TWO_BUCKET_REQUIRED_TOTAL      = {two_bucket.required_total_wealth:.2f}")
+    print(f"TWO_BUCKET_SINGLE_POT          = {two_bucket.single_pot_required_wealth:.2f}")
+    print(f"TWO_BUCKET_REACHABLE           = {two_bucket.reachable}")
+    print(f"TWO_BUCKET_WORST_STRESS_LABEL  = {two_bucket.worst_stress_label!r}")
+
+    matrix = compute_survival_matrix(
+        config, target_monthly, [("Portfolio", portfolio)], seed=seed, n_simulations=n,
+    )
+    row = matrix.rows[0]
+    print(f"SURVIVAL_MATRIX_NUM_SCENARIOS  = {len(matrix.scenario_labels)}")
+    print(f"SURVIVAL_MATRIX_BASELINE_SURV  = {row.survival_by_scenario[0]:.6f}")
+    print(f"SURVIVAL_MATRIX_BASELINE_MED   = {row.median_preserved_by_scenario[0]:.6f}")
+    print(f"SURVIVAL_MATRIX_WORST_SURV     = {min(row.survival_by_scenario):.6f}")
+
+    timing = compute_crash_timing_matrix(
+        config, target_monthly, [("Portfolio", portfolio)],
+        offsets=[0, 5, 10, 15], seed=seed, n_simulations=n,
+    )
+    trow = timing.rows[0]
+    print(f"CRASH_TIMING_CRASH_LABEL      = {timing.crash_label!r}")
+    print(f"CRASH_TIMING_SURVIVAL_YR0     = {trow.survival_by_offset[0]:.6f}")
+    print(f"CRASH_TIMING_SURVIVAL_YR15    = {trow.survival_by_offset[-1]:.6f}")
+    print(f"CRASH_TIMING_BASELINE_SURV    = {trow.baseline_survival:.6f}")
 
 
 if __name__ == "__main__":

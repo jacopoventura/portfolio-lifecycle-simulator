@@ -1,9 +1,12 @@
 from models import (
     Config,
+    CrashTimingMatrix,
     DecumInflationCagrCell,
     DecumInflationCagrGrid,
     FocusedPreservationTable,
     PriceOfConstraintMatrix,
+    SurvivalMatrix,
+    TwoBucketResult,
     WealthPreservationUnderSORR,
     YearsToRetirementTradeoff,
 )
@@ -12,6 +15,7 @@ from reports.formatters import (
     _print_subsection,
     format_currency,
     format_currency_signed,
+    format_millions,
 )
 
 
@@ -390,3 +394,181 @@ def print_price_of_constraint_matrix(matrix: PriceOfConstraintMatrix) -> None:
         print("  Each row's 'Price of safety' is the € the worst-historic-sequence")
         print("  confidence floor adds on top of baseline-only preservation at that X —")
         print("  the number a bequest-bucket-style structure would need to beat.")
+
+
+def print_two_bucket_comparison(result: TwoBucketResult) -> None:
+    _print_subsection(
+        f"4.13  Two-Bucket Structure vs. Single Pot (yr-{result.horizon_years})"
+    )
+    print()
+    conf_b = int(round(result.confidence_baseline * 100))
+    conf_s = int(round(result.confidence_stress * 100))
+    x_pct = int(round(result.preserve_ratio * 100))
+    print(f"  Same dual-confidence bar as the single-pot number below "
+          f"({conf_b}% baseline / {conf_s}% worst-SORR,")
+    print(f"  {result.worst_stress_label}), preserving {x_pct}% of starting capital. "
+          f"Retirement bucket uses")
+    print(f"  withdrawal_strategy=\"fixed\", identical to the single-pot number, so any "
+          f"€ difference")
+    print(f"  reflects the bucket STRUCTURE alone, not a smarter withdrawal rule.")
+    print()
+
+    r_bonds = int(round(result.retirement_optimal_bonds_pct * 100))
+    print(f"  Retirement bucket (R) — depletion allowed, survival bar only:")
+    print(f"    Required R*            : €{format_currency(result.required_retirement_wealth)}"
+          f"  ({r_bonds}% bonds)")
+    print(f"    Survival (baseline)    : {result.retirement_baseline_survival * 100:.1f}%  "
+          f"(target ≥{conf_b}%)")
+    print(f"    Survival (worst SORR)  : {result.retirement_stress_survival * 100:.1f}%  "
+          f"(target ≥{conf_s}%)")
+    print()
+
+    b_marker = "" if result.reachable else "*"
+    print(f"  Bequest bucket (B) — 100% equities, zero withdrawals for the full horizon:")
+    print(f"    Required B*            : €{format_currency(result.required_bequest_wealth)}{b_marker}")
+    print(f"    P(preserve, baseline)  : {result.bequest_baseline_p * 100:.1f}%  "
+          f"(target ≥{conf_b}%)")
+    print(f"    P(preserve, worst SORR): {result.bequest_stress_p * 100:.1f}%  "
+          f"(target ≥{conf_s}%)")
+    print()
+
+    print(f"    Two-bucket total       : €{format_currency(result.required_total_wealth)}{b_marker}")
+    print(f"    Single-pot required    : €{format_currency(result.single_pot_required_wealth)}  "
+          f"({int(round(result.single_pot_optimal_bonds_pct * 100))}% bonds)")
+    savings_marker = "" if result.reachable else "*"
+    print(f"    Savings vs. single pot : €{format_currency_signed(result.savings_vs_single_pot)}"
+          f"{savings_marker}"
+          f"{'  (two-bucket costs MORE)' if result.savings_vs_single_pot < 0 else '  (two-bucket costs less)'}")
+
+    print()
+    if not result.reachable:
+        print(f"  * B* not reachable within the search range — a 100%-equity bucket cannot clear")
+        print(f"  the {conf_b}%/{conf_s}% confidence bar on its own, regardless of size: fat-tailed")
+        print(f"  30-year return uncertainty means a meaningful fraction of paths end below the")
+        print(f"  preservation target even under baseline returns, capping achievable confidence")
+        print(f"  below your bar. This isn't a sequence-risk failure (B has none, by construction)")
+        print(f"  — it's terminal-distribution risk, and a mixed allocation handles that better")
+        print(f"  than pure equities at this confidence level.")
+    elif result.savings_vs_single_pot <= 0:
+        print(f"  Two-bucket does NOT reduce required wealth here: at {conf_b}%/{conf_s}% confidence,")
+        print(f"  a pure-equity bucket's own terminal-distribution risk costs more than the")
+        print(f"  sequence-risk it avoids. The single pot's mixed allocation is more")
+        print(f"  confidence-efficient at this bar.")
+    else:
+        print(f"  Two-bucket reduces required wealth by "
+              f"€{format_currency(result.savings_vs_single_pot)} for the same promise —")
+        print(f"  splitting into a never-touched bequest sleeve and a depletion-allowed")
+        print(f"  retirement sleeve is cheaper than one blended pot at this confidence bar.")
+
+
+_SCENARIO_SHORT_LABELS = {
+    "Baseline (random)": "Baseline",
+    "Forced crash (yr 1-5)": "Crash yr1-5",
+    "Historical 2000-2002": "2000-2002",
+    "Historical 2008-2009": "2008-2009",
+}
+
+
+def print_survival_matrix(matrix: SurvivalMatrix) -> None:
+    _print_subsection(
+        f"4.14  Survival Matrix — What Portfolio Survives Under Which Conditions "
+        f"(yr-{matrix.horizon_years})"
+    )
+    print()
+    print(f"  At the plan's current allocation, covering "
+          f"€{format_currency(matrix.target_monthly_withdrawal)}/mo nominal at retirement.")
+    print(f"  Each cell: SURVIVAL % (median capital PRESERVED %, real €) — see below the table.")
+    print()
+
+    row_labels = [f"{format_millions(row.wealth)}  {row.label}" for row in matrix.rows]
+    label_w = max([len("Portfolio"), *[len(rl) for rl in row_labels]], default=20)
+    col_w = 15
+    short_labels = [_SCENARIO_SHORT_LABELS.get(s, s) for s in matrix.scenario_labels]
+    header = f"  {'Portfolio':<{label_w}}"
+    for s in short_labels:
+        header += f"  {s:>{col_w}}"
+    print(header)
+    print("  " + "─" * (label_w + (col_w + 2) * len(short_labels)))
+
+    for row, row_label in zip(matrix.rows, row_labels):
+        line = f"  {row_label:<{label_w}}"
+        for i in range(len(matrix.scenario_labels)):
+            cell = (f"{row.survival_by_scenario[i] * 100:.0f}% "
+                    f"({row.median_preserved_by_scenario[i] * 100:.0f}%)")
+            line += f"  {cell:>{col_w}}"
+        print(line)
+
+    print()
+    print(f"  How to read this table")
+    print(f"    Each ROW is a candidate starting portfolio. Each COLUMN is a market")
+    print(f"    condition it's tested against: \"Baseline\" = ordinary random returns;")
+    print(f"    the other three force a real historical crash into the first years of")
+    print(f"    retirement. Each cell shows two numbers:")
+    print(f"      SURVIVAL  — P(the portfolio never fully runs out over "
+          f"{matrix.horizon_years} years)")
+    print(f"      PRESERVED — the typical (median) real capital left at the end, as a")
+    print(f"                  % of what you started with (in parentheses)")
+    print()
+
+    if matrix.rows:
+        anchor = matrix.rows[0]
+        worst_idx = min(
+            range(len(matrix.scenario_labels)),
+            key=lambda i: anchor.survival_by_scenario[i],
+        )
+        worst_label = matrix.scenario_labels[worst_idx]
+        worst_survival = anchor.survival_by_scenario[worst_idx] * 100
+        worst_median = anchor.median_preserved_by_scenario[worst_idx] * 100
+        worst_p5 = anchor.p5_preserved_by_scenario[worst_idx] * 100
+        print(f"  Example — at {anchor.label} ({format_millions(anchor.wealth)}), a "
+              f"{worst_label}-style crash:")
+        print(f"    {worst_survival:.0f}% chance you never run out over "
+              f"{matrix.horizon_years} years.")
+        print(f"    If you don't run out, you typically (median) end up with "
+              f"{worst_median:.0f}% of your starting capital.")
+        print(f"    In the worst 5% of outcomes (bad luck, not just bad average), "
+              f"you end up with {worst_p5:.0f}%.")
+
+
+def print_crash_timing_matrix(matrix: CrashTimingMatrix) -> None:
+    _print_subsection(
+        f"4.15  Crash Timing — Does WHEN the Crash Hits Matter? (yr-{matrix.horizon_years})"
+    )
+    print()
+    print(f"  Every other SORR scenario forces \"{matrix.crash_label}\" at year 0 (retirement day).")
+    print(f"  Here it's shifted to start at each year below instead, holding everything else fixed.")
+    print(f"  Pension starts year {matrix.pension_start_year} — watch for the jump around that column.")
+    print(f"  Each cell: survival probability (median % of starting capital preserved, real €).")
+    print()
+
+    row_labels = [f"{format_millions(row.wealth)}  {row.label}" for row in matrix.rows]
+    label_w = max([len("Portfolio"), *[len(rl) for rl in row_labels]], default=20)
+    col_w = 15
+    header = f"  {'Portfolio':<{label_w}}"
+    for offset in matrix.offsets:
+        header += f"  {f'Crash @ yr{offset}':>{col_w}}"
+    header += f"  {'No crash':>{col_w}}"
+    print(header)
+    print("  " + "─" * (label_w + (col_w + 2) * (len(matrix.offsets) + 1)))
+
+    for row, row_label in zip(matrix.rows, row_labels):
+        line = f"  {row_label:<{label_w}}"
+        for i in range(len(matrix.offsets)):
+            cell = (f"{row.survival_by_offset[i] * 100:.0f}% "
+                    f"({row.median_preserved_by_offset[i] * 100:.0f}%)")
+            line += f"  {cell:>{col_w}}"
+        baseline_cell = f"{row.baseline_survival * 100:.0f}% ({row.baseline_median_preserved * 100:.0f}%)"
+        line += f"  {baseline_cell:>{col_w}}"
+        print(line)
+
+    print()
+    if matrix.rows:
+        anchor = matrix.rows[0]
+        worst_survival = anchor.survival_by_offset[0]
+        best_survival = anchor.survival_by_offset[-1]
+        print(f"  At {anchor.label} ({format_millions(anchor.wealth)}): survival is "
+              f"{worst_survival * 100:.0f}% if the crash lands at retirement day (year 0),")
+        print(f"  rising to {best_survival * 100:.0f}% if it lands at year {matrix.offsets[-1]} instead "
+              f"(vs. {anchor.baseline_survival * 100:.0f}% with no crash at all).")
+        print(f"  Timing matters as much as magnitude here — the same crash is far more dangerous")
+        print(f"  in the years right after retirement than later, once the pension is running.")

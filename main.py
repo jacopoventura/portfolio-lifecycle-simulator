@@ -18,7 +18,7 @@ Usage:
   python main.py --from decum        # start from decumulation (uses config values for p50/tail)
   python main.py --from cagr         # CAGR only
   python main.py --from agent        # re-run agent on last captured context
-  python main.py --verbose           # pass --verbose to accumulation section
+  python main.py --verbose           # pass --verbose to accumulation and decumulation sections
 
 Requires ANTHROPIC_API_KEY in .env for section 4.
 """
@@ -364,11 +364,15 @@ def run_accum(verbose: bool = False, planning_cagr: str | None = None,
 
 
 def run_decum(p50: float,
-              planning_cagr: str | None = None) -> tuple[str, DecumulationSummary | None]:
+              planning_cagr: str | None = None,
+              verbose: bool = False) -> tuple[str, DecumulationSummary | None]:
     """Run decumulation section. Returns (report text, typed summary).
 
     p50: accumulation P50 wealth from main_portfolio_projection — used as the
          starting wealth for survival curves, fan, GK range, SORR, and §4.11.
+    verbose: if True, also prints §4.10-§4.15 (inflation×CAGR grid, SORR
+        preservation matrix, price-of-constraint, two-bucket, survival matrix,
+        crash timing) — otherwise only the Takeaway shows.
     """
     import main_decumulation as m
 
@@ -377,6 +381,7 @@ def run_decum(p50: float,
             portfolio_override=p50 if p50 > 0 else None,
             no_clear=True,
             cagr=planning_cagr,
+            verbose=verbose,
         ),
     )
     return text, summary if isinstance(summary, DecumulationSummary) else None
@@ -453,7 +458,7 @@ def main() -> None:
     parser.add_argument("--agent", action="store_true",
                         help="run AI agent (section 4) after sections 1–3")
     parser.add_argument("--verbose", action="store_true",
-                        help="pass --verbose to accumulation section")
+                        help="pass --verbose to accumulation and decumulation sections")
     parser.add_argument("--cagr", default=None,
                         help="override stock CAGR for all sections "
                              "(accepts 4, 4.0, 0.04, '4%%'); propagated to sub-scripts")
@@ -495,7 +500,7 @@ def main() -> None:
 
     if start <= _SECTIONS.index("decum"):
         print("  [2/3] decumulation…", flush=True)
-        decum_text, decum_summary = run_decum(p50, planning_cagr=planning_cagr)
+        decum_text, decum_summary = run_decum(p50, planning_cagr=planning_cagr, verbose=args.verbose)
 
     if start <= _SECTIONS.index("cagr"):
         print("  [3/3] instruments…", flush=True)

@@ -823,6 +823,21 @@ def print_plan_check(
         else:
             _pillar_cont("Assumes no pension income.")
 
+        # Preservation-ratio sensitivity — how much the "required wealth" number
+        # moves with the ambition you're actually funding, so it's never read at
+        # a single frozen ratio without seeing what that choice costs.
+        sens_ratios = decum_summary.preservation_sensitivity_ratios
+        sens_wealth = decum_summary.preservation_sensitivity_wealth_eur
+        if sens_ratios and sens_wealth:
+            conf_b = int(round(config.fi_preservation_confidence_baseline * 100))
+            conf_s = int(round(config.fi_preservation_confidence_stress * 100))
+            _pillar_cont(f"Required wealth by preservation ratio "
+                         f"({conf_b}% baseline / {conf_s}% worst-SORR confidence):")
+            for ratio, wealth in zip(sens_ratios, sens_wealth):
+                marker = "  ← your target" if abs(ratio - config.fi_preservation_ratio) < 1e-6 else ""
+                _pillar_cont(f"  {int(round(ratio * 100)):>3}% real → "
+                             f"{format_millions(wealth)}{marker}")
+
     # ── RETURN pillar ─────────────────────────────────────────────────────────
     if cape is None:
         _pillar("-", "RETURN", "CAPE data unavailable — realism unchecked this run.")

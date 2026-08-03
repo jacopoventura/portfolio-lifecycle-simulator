@@ -10,9 +10,10 @@ yield bar from pillar 1):
       to the preservation-required wealth?  (Accumulation lever.)
   Q3. What is the preservation-required wealth at the best allocation?
 
-Plus a years-to-retirement tradeoff table inside the Takeaway. In --verbose
-mode: full Q1/Q2/Q3 tables + §4.10 inflation × CAGR grid + §4.11 SORR
-preservation matrix.
+Plus a years-to-retirement tradeoff table and §4.14 survival matrix inside the
+Takeaway (always shown). In --verbose mode: full Q1/Q2/Q3 tables + §4.10
+inflation × CAGR grid + §4.11 SORR preservation matrix + §4.12 price-of-
+constraint + §4.13 two-bucket comparison + §4.15 crash-timing sensitivity.
 
 Usage:
     python main_decumulation.py
@@ -25,18 +26,25 @@ import tomllib
 
 from models import Config, DecumulationSummary
 from monte_carlo import (
+    compute_canonical_fi_required_scan,
+    compute_crash_timing_matrix,
     compute_decum_inflation_cagr_grid,
     compute_focused_preservation_table,
     compute_price_of_constraint_matrix,
+    compute_survival_matrix,
+    compute_two_bucket_required_wealth,
     compute_wealth_preservation_under_sorr,
     compute_years_to_retirement_tradeoff,
 )
 from reports.formatters import clear_terminal
 from reports.section4 import (
+    print_crash_timing_matrix,
     print_decum_inflation_cagr_heatmap,
     print_focused_preservation_table,
     print_focused_takeaway,
     print_price_of_constraint_matrix,
+    print_survival_matrix,
+    print_two_bucket_comparison,
     print_wealth_preservation_under_sorr,
 )
 
@@ -76,9 +84,9 @@ def main(
     """Run focused decumulation analysis. Prints the report and returns a summary.
 
     portfolio_override: starting wealth for §4.10/§4.11; defaults to the IT required portfolio.
-    verbose: if False (default), print only the Takeaway (which embeds the
-        years-to-retirement tradeoff). If True, also print the Q1/Q2/Q3 tables,
-        §4.10 inflation × CAGR grid, and §4.11 SORR preservation matrix.
+    verbose: if False (default), print the Takeaway (years-to-retirement
+        tradeoff + §4.14 survival matrix). If True, also print the Q1/Q2/Q3
+        tables, §4.10-§4.13, and §4.15 crash-timing sensitivity.
     """
     config = _load_config(config_path)
     config.planning_cagr_override = Config.parse_planning_cagr(cagr)
@@ -134,6 +142,32 @@ def main(
         n_simulations=2_000,
     )
 
+    # ── Preservation-ratio sensitivity — always computed (plan-check needs it) ─
+    # Dual-confidence (baseline + worst-SORR) required wealth at a handful of
+    # preserve_ratio values, so plan-check never states "how much do I need"
+    # at a single frozen ratio without showing what that choice costs.
+    if verbose:
+        print("Computing preservation-ratio sensitivity…", flush=True)
+    sensitivity_ratios = sorted({0.10, 0.25, 0.50, config.fi_preservation_ratio})
+    sensitivity_scan = compute_canonical_fi_required_scan(
+        config, target_monthly_nom,
+        preserve_ratios=sensitivity_ratios,
+        seed=seed,
+        n_simulations=min(n, 4_000),
+    )
+
+    # ── Survival matrix wealth points — always built, reused by §4.14/§4.15 ───
+    # Sourced entirely from already-computed data (no extra MC): the plan target
+    # plus one point per preservation ratio in the sensitivity scan above.
+    wealth_points: list[tuple[str, float]] = [
+        ("IT required portfolio", focused.it_required_portfolio),
+    ]
+    for ratio, row in zip(sensitivity_ratios, sensitivity_scan.rows):
+        label = f"{int(round(ratio * 100))}% preservation"
+        if abs(ratio - config.fi_preservation_ratio) < 1e-6:
+            label += " (your target)"
+        wealth_points.append((label, row.required_wealth_eur))
+
     # Supporting context (§4.10/§4.11) — only computed and shown in verbose mode.
     # Anchored on the IT required portfolio (matches focused Q1's primary anchor).
     if verbose:
@@ -162,6 +196,37 @@ def main(
             seed=seed,
         )
         print_price_of_constraint_matrix(constraint_matrix)
+
+        print("Computing two-bucket structure comparison…", flush=True)
+        two_bucket = compute_two_bucket_required_wealth(
+            config,
+            target_monthly_nom,
+            seed=seed,
+        )
+        print_two_bucket_comparison(two_bucket)
+        wealth_points.append(("two-bucket total", two_bucket.required_total_wealth))
+
+    # ── Survival matrix (§4.14) — always computed and printed, not gated by
+    # --verbose: this is the direct answer to "what portfolio survives under
+    # which conditions," so it belongs in the terse default output too.
+    print("Computing survival matrix…", flush=True)
+    survival_matrix = compute_survival_matrix(
+        config,
+        target_monthly_nom,
+        wealth_points,
+        seed=seed,
+    )
+    print_survival_matrix(survival_matrix)
+
+    if verbose:
+        print("Computing crash-timing sensitivity…", flush=True)
+        crash_timing = compute_crash_timing_matrix(
+            config,
+            target_monthly_nom,
+            wealth_points,
+            seed=seed,
+        )
+        print_crash_timing_matrix(crash_timing)
 
     # ── Takeaway (always printed; LAST block) ────────────────────────────────
     print_focused_takeaway(focused, tradeoff=tradeoff, config=config)
@@ -193,6 +258,10 @@ def main(
         max_safe_wd_at_plan_horizon_today=plan_row.max_safe_monthly_today_eur if plan_row else None,
         p50_final_real_wealth=focused.it_required_portfolio * focused.p50_real_final_at_it_required,
         p50_final_real_ratio=focused.p50_real_final_at_it_required,
+        preservation_sensitivity_ratios=sensitivity_ratios,
+        preservation_sensitivity_wealth_eur=[
+            row.required_wealth_eur for row in sensitivity_scan.rows
+        ],
     )
 
 

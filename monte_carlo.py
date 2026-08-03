@@ -40,8 +40,13 @@ from models import (
     CanonicalFIRequiredRow,
     CanonicalFIRequiredScan,
     FocusedPreservationTable,
+    CrashTimingMatrix,
+    CrashTimingRow,
     PriceOfConstraintMatrix,
     PriceOfConstraintRow,
+    SurvivalMatrix,
+    SurvivalMatrixRow,
+    TwoBucketResult,
     YearsToRetirementRow,
     YearsToRetirementTradeoff,
     SORRResult,
@@ -2499,6 +2504,521 @@ def compute_canonical_fi_required_scan(
         canonical_required_wealth=canonical_row.required_wealth_eur,
         canonical_optimal_bonds_pct=canonical_row.optimal_bonds_pct,
         canonical_reachable=canonical_row.reachable,
+    )
+
+
+def _solve_retirement_bucket(
+    config: Config,
+    target_monthly_nom: float,
+    baseline_stocks: np.ndarray,
+    worst_stocks: np.ndarray,
+    inflations: np.ndarray,
+    bond_yields: np.ndarray,
+    n: int,
+    ny: int,
+    Y: float,
+    Z: float,
+    bonds_pct_grid: list[float],
+    lo: float,
+    hi: float,
+    tolerance: float,
+) -> tuple[float, float, float, float, bool]:
+    """Binary search for the smallest retirement-bucket wealth R where, at some
+    allocation in bonds_pct_grid, survival clears both confidences.
+
+    Returns (R_star, optimal_bonds_pct, baseline_survival, stress_survival, reachable).
+
+    Uses DecumulationResult.survival_rate (P(portfolio > 0) at horizon), NOT
+    final_portfolios — the decum loop clamps a depleted portfolio at exactly
+    0, so `final_portfolios >= 0` is trivially always true and can't express
+    "did it run out."
+    """
+    loop_common = dict(
+        annual_inflations=inflations,
+        annual_bond_yields=bond_yields,
+        initial_monthly_wd=target_monthly_nom,
+        n_years=ny,
+        withdrawal_strategy="fixed",
+        bond_tax_rate=config.tax_rate_bond_italy,
+        pension_monthly=config.mc_decumulation_pension_monthly,
+        pension_start_year=config.mc_decumulation_pension_start_year,
+        pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
+        stock_pct_end=config.mc_decumulation_glide_end_pct,
+        glide_years=config.mc_decumulation_glide_years,
+        effective_stock_tax_rate=0.65 * config.decum_teilfreistellung * config.tax_rate,
+        return_final_portfolios=False,
+    )
+
+    def _survival(wealth: float, bonds_pct: float, patched_stocks: np.ndarray) -> float:
+        sa = 1.0 - bonds_pct
+        res = _run_decum_loop(
+            annual_stock_returns=patched_stocks,
+            initial_stock_v=np.full(n, wealth * sa),
+            initial_bond_v=np.full(n, wealth * (1.0 - sa)),
+            **loop_common,
+        )
+        return res.survival_rate
+
+    def _feasible(R: float) -> tuple[bool, float, float, float]:
+        best_meets = False
+        best_alloc = bonds_pct_grid[0]
+        best_base = 0.0
+        best_strs = 0.0
+        best_slack = -float("inf")
+        for bonds_pct in bonds_pct_grid:
+            base_p = _survival(R, bonds_pct, baseline_stocks)
+            strs_p = _survival(R, bonds_pct, worst_stocks)
+            meets = (base_p >= Y) and (strs_p >= Z)
+            slack = min(base_p - Y, strs_p - Z)
+            if meets and not best_meets:
+                best_meets, best_alloc = True, bonds_pct
+                best_base, best_strs, best_slack = base_p, strs_p, slack
+            elif meets and best_meets and slack > best_slack:
+                best_alloc, best_base, best_strs, best_slack = bonds_pct, base_p, strs_p, slack
+            elif not best_meets and slack > best_slack:
+                best_alloc, best_base, best_strs, best_slack = bonds_pct, base_p, strs_p, slack
+        return best_meets, best_alloc, best_base, best_strs
+
+    feasible_hi, alloc_hi, base_hi, strs_hi = _feasible(hi)
+    if not feasible_hi:
+        return hi, alloc_hi, base_hi, strs_hi, False
+
+    lo_r, hi_r = lo, hi
+    last_alloc, last_base, last_strs = alloc_hi, base_hi, strs_hi
+    for _ in range(40):
+        if hi_r - lo_r < tolerance:
+            break
+        mid = 0.5 * (lo_r + hi_r)
+        ok, alloc, base_p, strs_p = _feasible(mid)
+        if ok:
+            hi_r = mid
+            last_alloc, last_base, last_strs = alloc, base_p, strs_p
+        else:
+            lo_r = mid
+    return hi_r, last_alloc, last_base, last_strs, True
+
+
+def _solve_bequest_bucket(
+    baseline_stocks: np.ndarray,
+    worst_stocks: np.ndarray,
+    cum_inf_final: np.ndarray,
+    ny: int,
+    X: float,
+    Y: float,
+    Z: float,
+    r_star: float,
+    lo: float,
+    hi: float,
+    tolerance: float,
+) -> tuple[float, float, float, bool]:
+    """Binary search for the smallest bequest-bucket wealth B where, 100%
+    equities and zero withdrawals for the full horizon, P(B_final_real ≥
+    X·(B + r_star)) clears both confidences. No allocation grid — B is 100%
+    equities by definition of the bucket.
+
+    Returns (B_star, baseline_p, stress_p, reachable). Target scales with B
+    itself (via total wealth B + r_star), but since B_final grows linearly in
+    B for a fixed simulated path, the fraction of paths meeting the bar is
+    still monotonic non-decreasing in B — a plain binary search is valid.
+    """
+    growth_baseline = np.prod(1.0 + baseline_stocks[:, :ny], axis=1)
+    growth_stress = np.prod(1.0 + worst_stocks[:, :ny], axis=1)
+
+    def _feasible(B: float) -> tuple[bool, float, float]:
+        target = X * (B + r_star)
+        base_p = float(np.mean(B * growth_baseline / cum_inf_final >= target))
+        strs_p = float(np.mean(B * growth_stress / cum_inf_final >= target))
+        return (base_p >= Y) and (strs_p >= Z), base_p, strs_p
+
+    feasible_hi, base_hi, strs_hi = _feasible(hi)
+    if not feasible_hi:
+        return hi, base_hi, strs_hi, False
+
+    lo_b, hi_b = lo, hi
+    last_base, last_strs = base_hi, strs_hi
+    for _ in range(40):
+        if hi_b - lo_b < tolerance:
+            break
+        mid = 0.5 * (lo_b + hi_b)
+        ok, base_p, strs_p = _feasible(mid)
+        if ok:
+            hi_b = mid
+            last_base, last_strs = base_p, strs_p
+        else:
+            lo_b = mid
+    return hi_b, last_base, last_strs, True
+
+
+def compute_two_bucket_required_wealth(
+    config: Config,
+    target_monthly_nom: float,
+    *,
+    preserve_ratio: float | None = None,
+    bonds_pct_grid: list[float] | None = None,
+    lo: float = 100_000.0,
+    hi: float = 15_000_000.0,
+    tolerance: float = 5_000.0,
+    seed: int = 42,
+    n_simulations: int = 5_000,
+) -> TwoBucketResult:
+    """E3 — does splitting wealth into a bequest bucket (100% equities, zero
+    withdrawals) + a retirement bucket (depletion allowed, survival bar only)
+    need less total capital than a single blended pot for the same promise?
+
+    Both buckets are checked against the SAME dual-confidence bar
+    (config.fi_preservation_confidence_baseline / _stress) used by
+    compute_canonical_fi_required_scan(), which is also called here (same
+    seed ⇒ identical underlying draws, verified pattern used throughout this
+    module) to produce the single-pot comparison figure and to pick the
+    shared worst-SORR sequence — both structures are stress-tested against
+    the SAME historical sequence, not each picking their own worst case.
+    Retirement bucket R uses withdrawal_strategy="fixed", identical to every
+    other comparison number in this pipeline, so any € difference reflects
+    the bucket STRUCTURE alone, not a smarter withdrawal rule.
+
+    R is solved first — its survival bar doesn't depend on B or total wealth
+    at all, so its minimum is a hard floor independent of the split. B is
+    then solved given R fixed; this sequential solve IS the joint minimum
+    (no 2D search over (B, R) can do better, since B never subsidises R's
+    spending — zero cross-subsidy by the bucket definition), not a heuristic
+    approximation.
+    """
+    if preserve_ratio is None:
+        preserve_ratio = config.fi_preservation_ratio
+    if bonds_pct_grid is None:
+        bonds_pct_grid = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+
+    current_bonds = config.bonds_percentage / 100.0
+    if not any(abs(b - current_bonds) < 1e-6 for b in bonds_pct_grid):
+        bonds_pct_grid = sorted(bonds_pct_grid + [current_bonds])
+
+    n = n_simulations
+    ny = config.mc_decumulation_years
+    X = preserve_ratio
+    Y = config.fi_preservation_confidence_baseline
+    Z = config.fi_preservation_confidence_stress
+
+    # ── Single-pot comparison + shared worst-SORR pick ───────────────────────
+    # Same seed/grid/bounds as everything below ⇒ compared cell-by-cell, and
+    # its worst_stress_label is reused for both buckets' stress tests so all
+    # three numbers face the identical crash sequence.
+    single_scan = compute_canonical_fi_required_scan(
+        config, target_monthly_nom,
+        preserve_ratios=[X], bonds_pct_grid=list(bonds_pct_grid),
+        lo=lo, hi=hi, tolerance=tolerance, seed=seed, n_simulations=n_simulations,
+    )
+    single_row = single_scan.rows[0]
+
+    ss = config.mc_stock_return_std_percent / 100
+    is_ = config.mc_inflation_std_percent / 100
+    rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
+    stock_returns, inflations, bond_yields = _generate_mc_returns(
+        rng, n, ny,
+        config.planning_cagr, ss,
+        config.expected_inflation_percent / 100, is_,
+        config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
+        inflation_ar1_phi=config.mc_inflation_ar1_phi,
+        stock_return_df=config.mc_stock_return_df,
+        stock_bond_corr=config.mc_stock_bond_correlation,
+        stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
+        stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
+        stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
+    )
+    cum_inf_final = np.prod(1.0 + inflations, axis=1)
+
+    worst_seq = dict(_SORR_SEQUENCES)[single_scan.worst_stress_label]
+    baseline_stocks = stock_returns
+    worst_stocks = stock_returns.copy()
+    for t, r in enumerate(worst_seq):
+        if t < ny:
+            worst_stocks[:, t] = r
+
+    # ── Solve R* (retirement bucket) — survival bar, independent of B/W ──────
+    r_star, r_alloc, r_base_p, r_strs_p, r_reachable = _solve_retirement_bucket(
+        config, target_monthly_nom, baseline_stocks, worst_stocks,
+        inflations, bond_yields, n, ny, Y, Z, bonds_pct_grid, lo, hi, tolerance,
+    )
+
+    # ── Solve B* (bequest bucket) given R* fixed ─────────────────────────────
+    b_star, b_base_p, b_strs_p, b_reachable = _solve_bequest_bucket(
+        baseline_stocks, worst_stocks, cum_inf_final, ny,
+        X, Y, Z, r_star, lo, hi, tolerance,
+    )
+
+    total_wealth = r_star + b_star
+
+    return TwoBucketResult(
+        horizon_years=ny,
+        preserve_ratio=X,
+        confidence_baseline=Y,
+        confidence_stress=Z,
+        worst_stress_label=single_scan.worst_stress_label,
+        required_retirement_wealth=r_star,
+        retirement_optimal_bonds_pct=r_alloc,
+        retirement_baseline_survival=r_base_p,
+        retirement_stress_survival=r_strs_p,
+        required_bequest_wealth=b_star,
+        bequest_baseline_p=b_base_p,
+        bequest_stress_p=b_strs_p,
+        required_total_wealth=total_wealth,
+        single_pot_required_wealth=single_row.required_wealth_eur,
+        single_pot_optimal_bonds_pct=single_row.optimal_bonds_pct,
+        savings_vs_single_pot=single_row.required_wealth_eur - total_wealth,
+        reachable=r_reachable and b_reachable,
+    )
+
+
+def compute_survival_matrix(
+    config: Config,
+    target_monthly_nom: float,
+    wealth_points: list[tuple[str, float]],
+    *,
+    bonds_pct: float | None = None,
+    seed: int = 42,
+    n_simulations: int = 5_000,
+) -> SurvivalMatrix:
+    """What portfolio survives under which conditions?
+
+    For each (label, wealth) in wealth_points, at the plan's CURRENT allocation
+    (config.bonds_percentage, with its own glide path) — not an optimizer —
+    reports survival (P(portfolio > 0) at horizon, the correct metric: the decum
+    loop clamps a depleted portfolio at exactly 0, so `final ≥ 0` is trivially
+    always true) and capital preserved (median / P5 final REAL wealth as a
+    fraction of the row's starting wealth) under baseline (random) returns and
+    each named historical stress scenario.
+
+    This is the direct, forward answer to the north-star question behind every
+    inverse-search number elsewhere in this module (canonical scan, price-of-
+    constraint, two-bucket all solve "what wealth do I need for X% confidence?"
+    — this instead takes a wealth number and shows what actually happens to it).
+    """
+    if bonds_pct is None:
+        bonds_pct = config.bonds_percentage / 100.0
+    sa = 1.0 - bonds_pct
+
+    n = n_simulations
+    ny = config.mc_decumulation_years
+    ss = config.mc_stock_return_std_percent / 100
+    is_ = config.mc_inflation_std_percent / 100
+    rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
+    stock_returns, inflations, bond_yields = _generate_mc_returns(
+        rng, n, ny,
+        config.planning_cagr, ss,
+        config.expected_inflation_percent / 100, is_,
+        config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
+        inflation_ar1_phi=config.mc_inflation_ar1_phi,
+        stock_return_df=config.mc_stock_return_df,
+        stock_bond_corr=config.mc_stock_bond_correlation,
+        stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
+        stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
+        stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
+    )
+    cum_inf_final = np.prod(1.0 + inflations, axis=1)
+
+    scenarios: list[tuple[str, list[float]]] = [("Baseline (random)", [])]
+    scenarios.extend(_SORR_SEQUENCES)
+
+    loop_common = dict(
+        annual_inflations=inflations,
+        annual_bond_yields=bond_yields,
+        initial_monthly_wd=target_monthly_nom,
+        n_years=ny,
+        withdrawal_strategy="fixed",
+        bond_tax_rate=config.tax_rate_bond_italy,
+        pension_monthly=config.mc_decumulation_pension_monthly,
+        pension_start_year=config.mc_decumulation_pension_start_year,
+        pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
+        stock_pct_end=config.mc_decumulation_glide_end_pct,
+        glide_years=config.mc_decumulation_glide_years,
+        effective_stock_tax_rate=0.65 * config.decum_teilfreistellung * config.tax_rate,
+        return_final_portfolios=True,
+    )
+
+    # Patched stock paths are shared across every wealth point — build once.
+    patched_by_scenario: dict[str, np.ndarray] = {}
+    for label, seq in scenarios:
+        patched = stock_returns.copy()
+        for t, r in enumerate(seq):
+            if t < ny:
+                patched[:, t] = r
+        patched_by_scenario[label] = patched
+
+    rows: list[SurvivalMatrixRow] = []
+    for point_label, wealth in wealth_points:
+        survival_by_scenario: list[float] = []
+        median_preserved_by_scenario: list[float] = []
+        p5_preserved_by_scenario: list[float] = []
+        for label, _ in scenarios:
+            res = _run_decum_loop(
+                annual_stock_returns=patched_by_scenario[label],
+                initial_stock_v=np.full(n, wealth * sa),
+                initial_bond_v=np.full(n, wealth * (1.0 - sa)),
+                **loop_common,
+            )
+            finals_real = np.asarray(res.final_portfolios) / cum_inf_final
+            survival_by_scenario.append(res.survival_rate)
+            median_preserved_by_scenario.append(
+                float(np.median(finals_real)) / wealth if wealth > 0 else 0.0
+            )
+            p5_preserved_by_scenario.append(
+                float(np.percentile(finals_real, 5)) / wealth if wealth > 0 else 0.0
+            )
+        rows.append(SurvivalMatrixRow(
+            label=point_label,
+            wealth=wealth,
+            bonds_pct=bonds_pct,
+            survival_by_scenario=survival_by_scenario,
+            median_preserved_by_scenario=median_preserved_by_scenario,
+            p5_preserved_by_scenario=p5_preserved_by_scenario,
+        ))
+
+    return SurvivalMatrix(
+        horizon_years=ny,
+        target_monthly_withdrawal=target_monthly_nom,
+        scenario_labels=[label for label, _ in scenarios],
+        rows=rows,
+    )
+
+
+def compute_crash_timing_matrix(
+    config: Config,
+    target_monthly_nom: float,
+    wealth_points: list[tuple[str, float]],
+    *,
+    crash_label: str | None = None,
+    offsets: list[int] | None = None,
+    bonds_pct: float | None = None,
+    seed: int = 42,
+    n_simulations: int = 5_000,
+) -> CrashTimingMatrix:
+    """Does WHEN a crash hits matter, not just whether it hits?
+
+    Every SORR scenario elsewhere in this module forces the crash at year 0
+    (retirement day) — the traditional worst case. This instead takes ONE
+    crash sequence (default: "Historical 2000-2002", the worst-stress sequence
+    used everywhere else this session) and shifts its start year across
+    `offsets`, holding everything else fixed, to see whether a crash landing
+    after config.mc_decumulation_pension_start_year is meaningfully less
+    damaging than one at retirement day.
+
+    Same allocation/glide/pension convention as compute_survival_matrix: the
+    plan's CURRENT allocation, not an optimizer.
+    """
+    if offsets is None:
+        offsets = [0, 5, 10, 15, 20, 25]
+    if bonds_pct is None:
+        bonds_pct = config.bonds_percentage / 100.0
+    sa = 1.0 - bonds_pct
+
+    n = n_simulations
+    ny = config.mc_decumulation_years
+    ss = config.mc_stock_return_std_percent / 100
+    is_ = config.mc_inflation_std_percent / 100
+    rng = np.random.default_rng(seed)
+    _bs = _get_bootstrap_returns(config)
+    stock_returns, inflations, bond_yields = _generate_mc_returns(
+        rng, n, ny,
+        config.planning_cagr, ss,
+        config.expected_inflation_percent / 100, is_,
+        config.yield_bonds / 100, config.mc_bond_yield_std_percent / 100,
+        inflation_ar1_phi=config.mc_inflation_ar1_phi,
+        stock_return_df=config.mc_stock_return_df,
+        stock_bond_corr=config.mc_stock_bond_correlation,
+        stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
+        stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
+        stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
+        bootstrap_annual_returns=_bs,
+        bootstrap_block_size=config.mc_bootstrap_block_size,
+        bootstrap_mean_shift=config.mc_bootstrap_mean_shift,
+    )
+    cum_inf_final = np.prod(1.0 + inflations, axis=1)
+
+    if crash_label is None:
+        crash_label = _SORR_SEQUENCES[1][0]  # "Historical 2000-2002"
+    crash_seq = dict(_SORR_SEQUENCES)[crash_label]
+
+    loop_common = dict(
+        annual_inflations=inflations,
+        annual_bond_yields=bond_yields,
+        initial_monthly_wd=target_monthly_nom,
+        n_years=ny,
+        withdrawal_strategy="fixed",
+        bond_tax_rate=config.tax_rate_bond_italy,
+        pension_monthly=config.mc_decumulation_pension_monthly,
+        pension_start_year=config.mc_decumulation_pension_start_year,
+        pension_adjustment_rate=config.mc_decumulation_pension_adjustment_rate,
+        stock_pct_end=config.mc_decumulation_glide_end_pct,
+        glide_years=config.mc_decumulation_glide_years,
+        effective_stock_tax_rate=0.65 * config.decum_teilfreistellung * config.tax_rate,
+        return_final_portfolios=True,
+    )
+
+    # Patched stock paths per offset — shared across every wealth point.
+    patched_by_offset: dict[int, np.ndarray] = {}
+    for offset in offsets:
+        patched = stock_returns.copy()
+        for t, r in enumerate(crash_seq):
+            year = offset + t
+            if year < ny:
+                patched[:, year] = r
+        patched_by_offset[offset] = patched
+
+    rows: list[CrashTimingRow] = []
+    for point_label, wealth in wealth_points:
+        res_baseline = _run_decum_loop(
+            annual_stock_returns=stock_returns,
+            initial_stock_v=np.full(n, wealth * sa),
+            initial_bond_v=np.full(n, wealth * (1.0 - sa)),
+            **loop_common,
+        )
+        baseline_finals_real = np.asarray(res_baseline.final_portfolios) / cum_inf_final
+        baseline_median = float(np.median(baseline_finals_real)) / wealth if wealth > 0 else 0.0
+
+        survival_by_offset: list[float] = []
+        median_preserved_by_offset: list[float] = []
+        p5_preserved_by_offset: list[float] = []
+        for offset in offsets:
+            res = _run_decum_loop(
+                annual_stock_returns=patched_by_offset[offset],
+                initial_stock_v=np.full(n, wealth * sa),
+                initial_bond_v=np.full(n, wealth * (1.0 - sa)),
+                **loop_common,
+            )
+            finals_real = np.asarray(res.final_portfolios) / cum_inf_final
+            survival_by_offset.append(res.survival_rate)
+            median_preserved_by_offset.append(
+                float(np.median(finals_real)) / wealth if wealth > 0 else 0.0
+            )
+            p5_preserved_by_offset.append(
+                float(np.percentile(finals_real, 5)) / wealth if wealth > 0 else 0.0
+            )
+
+        rows.append(CrashTimingRow(
+            label=point_label,
+            wealth=wealth,
+            bonds_pct=bonds_pct,
+            baseline_survival=res_baseline.survival_rate,
+            baseline_median_preserved=baseline_median,
+            survival_by_offset=survival_by_offset,
+            median_preserved_by_offset=median_preserved_by_offset,
+            p5_preserved_by_offset=p5_preserved_by_offset,
+        ))
+
+    return CrashTimingMatrix(
+        horizon_years=ny,
+        target_monthly_withdrawal=target_monthly_nom,
+        crash_label=crash_label,
+        pension_start_year=config.mc_decumulation_pension_start_year,
+        offsets=offsets,
+        rows=rows,
     )
 
 

@@ -596,6 +596,102 @@ class PriceOfConstraintMatrix:
     rows: list[PriceOfConstraintRow]      # one per preserve_ratio
 
 
+@dataclass
+class TwoBucketResult:
+    """E3 — two-bucket structure vs. single blended pot, same confidence bar.
+
+    Bequest bucket B: 100% equities, zero withdrawals for the full horizon —
+    no sequence risk, only the terminal distribution matters. Target:
+    B_final_real ≥ preserve_ratio × (B + R).
+    Retirement bucket R: funds target_monthly_withdrawal, depletion allowed
+    (survival bar only — P(portfolio > 0) at horizon, NOT final ≥ 0, which is
+    trivially true once a decum path is clamped at zero). withdrawal_strategy
+    is "fixed", identical to the single-pot comparison, so any € difference
+    reflects the bucket structure alone, not a smarter withdrawal rule.
+
+    R is solved first (its bar doesn't depend on B or total wealth at all),
+    then B given R fixed — this sequential solve is the joint minimum, not an
+    approximation (see monte_carlo.compute_two_bucket_required_wealth).
+    """
+    horizon_years: int
+    preserve_ratio: float                  # X, same as the single-pot comparison
+    confidence_baseline: float             # Y from config — applies to both buckets
+    confidence_stress: float               # Z from config — applies to both buckets
+    worst_stress_label: str                # which SORR sequence binds
+    required_retirement_wealth: float      # R*
+    retirement_optimal_bonds_pct: float    # R's own allocation (its own glide start)
+    retirement_baseline_survival: float    # P(R survives) under baseline at R*
+    retirement_stress_survival: float      # P(R survives) under worst-SORR at R*
+    required_bequest_wealth: float         # B*, given R fixed at R*
+    bequest_baseline_p: float              # P(B_final_real ≥ X·W) under baseline at B*
+    bequest_stress_p: float                # P(B_final_real ≥ X·W) under worst-SORR at B*
+    required_total_wealth: float           # B* + R*
+    single_pot_required_wealth: float      # compute_canonical_fi_required_scan(), same X/confidences
+    single_pot_optimal_bonds_pct: float
+    savings_vs_single_pot: float           # single_pot_required_wealth - required_total_wealth
+    reachable: bool                        # both R* and B* found within search bounds
+
+
+@dataclass
+class SurvivalMatrixRow:
+    """One portfolio-size row: survival + capital preserved under each scenario,
+    at the plan's CURRENT allocation (not an optimizer — this shows what your
+    actual plan does, not the cheapest way to hit a bar)."""
+    label: str                                  # e.g. "IT required portfolio"
+    wealth: float                               # starting wealth this row represents
+    bonds_pct: float                            # allocation used (config.bonds_percentage)
+    survival_by_scenario: list[float]           # P(portfolio > 0) at horizon, per scenario
+    median_preserved_by_scenario: list[float]   # P50 final real / starting wealth, per scenario
+    p5_preserved_by_scenario: list[float]       # P5 (bad luck) final real / starting wealth, per scenario
+
+
+@dataclass
+class SurvivalMatrix:
+    """What portfolio survives under which conditions — the north-star question
+    behind every canonical / price-of-constraint / two-bucket number elsewhere
+    in this module. Directly answers, at the plan's current allocation: for
+    each candidate portfolio size, does it survive (and how much capital
+    remains) under baseline returns and each named historical crash?
+    """
+    horizon_years: int
+    target_monthly_withdrawal: float
+    scenario_labels: list[str]                  # ["Baseline (random)", "Forced crash (yr 1-5)", ...]
+    rows: list[SurvivalMatrixRow]                # one per labeled wealth point
+
+
+@dataclass
+class CrashTimingRow:
+    """One portfolio-size row: survival + capital preserved as the SAME crash
+    sequence is shifted to start at each year in `offsets`, instead of always
+    at year 0 (retirement day) like every other SORR scenario in this module."""
+    label: str
+    wealth: float
+    bonds_pct: float
+    baseline_survival: float             # P(survive) with no crash at all — reference
+    baseline_median_preserved: float     # P50 final real / starting wealth, no crash
+    survival_by_offset: list[float]      # P(survive), one per offset in CrashTimingMatrix.offsets
+    median_preserved_by_offset: list[float]
+    p5_preserved_by_offset: list[float]
+
+
+@dataclass
+class CrashTimingMatrix:
+    """Does WHEN a crash hits matter, not just whether it hits?
+
+    Every other SORR scenario in this module forces the crash at year 0. This
+    takes ONE crash sequence (default: "Historical 2000-2002", the worst-stress
+    sequence used everywhere else this session) and shifts its start year
+    across `offsets`, so a crash landing after config.mc_decumulation_pension_
+    start_year can be compared against one at retirement day.
+    """
+    horizon_years: int
+    target_monthly_withdrawal: float
+    crash_label: str
+    pension_start_year: int
+    offsets: list[int]                   # e.g. [0, 5, 10, 15, 20, 25]
+    rows: list[CrashTimingRow]           # one per labeled wealth point
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TARGET PORTFOLIO TERMINOLOGY — three distinct concepts, do not confuse.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -629,11 +725,20 @@ class PriceOfConstraintMatrix:
 #       Question: "Same as #2 but also robust under historic crash sequences?"
 #       For user's config: ~€6.10M (higher than #2 by the SORR margin).
 #
+# 4. "Two-bucket required wealth"  (short: "Two-bucket total")
+#       compute_two_bucket_required_wealth() → TwoBucketResult.required_total_wealth
+#       = smallest B+R where a 100%-equity, zero-withdrawal bequest bucket B
+#         and a depletion-allowed retirement bucket R EACH separately clear the
+#         SAME dual-confidence bar as #3 (B on preservation, R on survival).
+#       Question: "Does splitting into two buckets need less capital than #3
+#       for the identical combined promise?" Reported alongside #3 in §4.13.
+#
 # The IT scenario typically: accumulation TARGETS #1 (income-formula bar;
 # see feedback 2026-05-24 — preservation lives in decum's tradeoff table).
 # Decumulation reports #1 as the anchor for Q1 ("does the survival bar also
 # preserve?") and #2 as the answer to Q3 ("what wealth would preserve at the
-# target confidence?"). #3's € premium over #2 is surfaced via §4.12.
+# target confidence?"). #3's € premium over #2 is surfaced via §4.12, and #4
+# tests whether #3 itself is the cheapest structure for that promise, via §4.13.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -769,6 +874,13 @@ class DecumulationSummary:
     # preservation pillar. Ratio = fraction of that starting portfolio.
     p50_final_real_wealth: float | None = None
     p50_final_real_ratio: float | None = None
+    # Live preservation-ratio sensitivity — required wealth (dual-confidence,
+    # baseline + worst-SORR) at a handful of preserve_ratio values, always
+    # including config.fi_preservation_ratio. Parallel lists. Shown in
+    # plan-check so "how much do I need" is never read at a single frozen
+    # ratio without seeing how much that choice costs.
+    preservation_sensitivity_ratios: list[float] | None = None
+    preservation_sensitivity_wealth_eur: list[float] | None = None
 
 
 @dataclass

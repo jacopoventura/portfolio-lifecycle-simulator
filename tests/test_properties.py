@@ -11,7 +11,10 @@ from models import Config
 from monte_carlo import (
     compute_canonical_fi_required_scan,
     compute_chained_mc,
+    compute_crash_timing_matrix,
     compute_sorr_scenarios,
+    compute_survival_matrix,
+    compute_two_bucket_required_wealth,
     compute_wealth_preservation_under_sorr,
     simulate_decumulation,
 )
@@ -291,3 +294,175 @@ class TestConsistency:
                     if abs(r.preserve_ratio - scan.canonical_ratio) < 1e-6]
         assert matching, "canonical_ratio not found in scan rows"
         assert matching[0].required_wealth_eur == scan.canonical_required_wealth
+
+
+# ── Two-bucket (E3) invariants ────────────────────────────────────────────────
+
+
+class TestTwoBucketProperties:
+    def test_total_equals_sum_of_buckets(self):
+        config = _make_config()
+        infl = (1 + config.expected_inflation_percent / 100) ** config.years
+        target_monthly = config.target_monthly_retirement_income * infl
+        result = compute_two_bucket_required_wealth(
+            config, target_monthly, seed=_SEED, n_simulations=_N,
+        )
+        assert result.required_total_wealth == pytest.approx(
+            result.required_retirement_wealth + result.required_bequest_wealth
+        )
+
+    def test_probabilities_in_unit_interval(self):
+        config = _make_config()
+        infl = (1 + config.expected_inflation_percent / 100) ** config.years
+        target_monthly = config.target_monthly_retirement_income * infl
+        result = compute_two_bucket_required_wealth(
+            config, target_monthly, seed=_SEED, n_simulations=_N,
+        )
+        for p in (result.retirement_baseline_survival, result.retirement_stress_survival,
+                  result.bequest_baseline_p, result.bequest_stress_p):
+            assert 0.0 <= p <= 1.0
+
+    def test_higher_preserve_ratio_does_not_decrease_bequest_wealth(self):
+        # R doesn't depend on preserve_ratio at all (survival bar only), so this
+        # isolates B's own monotonicity: preserving more of a larger total (X·(B+R))
+        # costs more bequest-bucket capital. Ratios chosen so both are reachable
+        # for this fixture (0.75 saturates the search ceiling here).
+        config = _make_config()
+        infl = (1 + config.expected_inflation_percent / 100) ** config.years
+        target_monthly = config.target_monthly_retirement_income * infl
+        lax = compute_two_bucket_required_wealth(
+            config, target_monthly, preserve_ratio=0.10, seed=_SEED, n_simulations=_N,
+        )
+        strict = compute_two_bucket_required_wealth(
+            config, target_monthly, preserve_ratio=0.30, seed=_SEED, n_simulations=_N,
+        )
+        if lax.reachable and strict.reachable:
+            assert strict.required_bequest_wealth >= lax.required_bequest_wealth - 10_000.0
+
+    def test_retirement_wealth_independent_of_preserve_ratio(self):
+        # R's survival bar has no notion of preserve_ratio — same R* regardless.
+        config = _make_config()
+        infl = (1 + config.expected_inflation_percent / 100) ** config.years
+        target_monthly = config.target_monthly_retirement_income * infl
+        low = compute_two_bucket_required_wealth(
+            config, target_monthly, preserve_ratio=0.10, seed=_SEED, n_simulations=_N,
+        )
+        high = compute_two_bucket_required_wealth(
+            config, target_monthly, preserve_ratio=0.75, seed=_SEED, n_simulations=_N,
+        )
+        assert low.required_retirement_wealth == pytest.approx(
+            high.required_retirement_wealth, rel=0.01
+        )
+
+
+# ── Survival matrix invariants ────────────────────────────────────────────────
+
+
+class TestSurvivalMatrixProperties:
+    def test_probabilities_and_ratios_well_formed(self):
+        config = _make_config()
+        infl = (1 + config.expected_inflation_percent / 100) ** config.years
+        target_monthly = config.target_monthly_retirement_income * infl
+        matrix = compute_survival_matrix(
+            config, target_monthly, [("P", _PORTFOLIO)], seed=_SEED, n_simulations=_N,
+        )
+        row = matrix.rows[0]
+        n_scenarios = len(matrix.scenario_labels)
+        assert len(row.survival_by_scenario) == n_scenarios
+        assert len(row.median_preserved_by_scenario) == n_scenarios
+        assert len(row.p5_preserved_by_scenario) == n_scenarios
+        for p in row.survival_by_scenario:
+            assert 0.0 <= p <= 1.0
+        for ratio in row.median_preserved_by_scenario + row.p5_preserved_by_scenario:
+            assert ratio >= 0.0
+
+    def test_median_preserved_does_not_exceed_survival_implied_bound(self):
+        # P5 (worse luck) preserved ratio should never exceed the median for the
+        # same scenario — P5 is the 5th percentile of a real-final distribution.
+        config = _make_config()
+        infl = (1 + config.expected_inflation_percent / 100) ** config.years
+        target_monthly = config.target_monthly_retirement_income * infl
+        matrix = compute_survival_matrix(
+            config, target_monthly, [("P", _PORTFOLIO)], seed=_SEED, n_simulations=_N,
+        )
+        row = matrix.rows[0]
+        for p5, med in zip(row.p5_preserved_by_scenario, row.median_preserved_by_scenario):
+            assert p5 <= med + 1e-9
+
+    def test_higher_wealth_does_not_decrease_survival(self):
+        config = _make_config()
+        infl = (1 + config.expected_inflation_percent / 100) ** config.years
+        target_monthly = config.target_monthly_retirement_income * infl
+        matrix = compute_survival_matrix(
+            config, target_monthly,
+            [("low", _PORTFOLIO), ("high", _PORTFOLIO * 2.0)],
+            seed=_SEED, n_simulations=_N,
+        )
+        low_row, high_row = matrix.rows
+        for low_p, high_p in zip(low_row.survival_by_scenario, high_row.survival_by_scenario):
+            assert high_p >= low_p - 0.02
+
+    def test_baseline_survival_matches_default_simulate(self):
+        # Same seed + same n_simulations -> same MC draws -> identical baseline survival.
+        config = _make_config()
+        infl = (1 + config.expected_inflation_percent / 100) ** config.years
+        target_monthly = config.target_monthly_retirement_income * infl
+        matrix = compute_survival_matrix(
+            config, target_monthly, [("P", _PORTFOLIO)], seed=_SEED, n_simulations=_N,
+        )
+        baseline_simulate = simulate_decumulation(
+            config, initial_portfolio=_PORTFOLIO, seed=_SEED, n_simulations=_N,
+            monthly_withdrawal_override=target_monthly,
+        )
+        assert abs(matrix.rows[0].survival_by_scenario[0] - baseline_simulate.survival_rate) <= 0.02
+
+
+# ── Crash-timing invariants ───────────────────────────────────────────────────
+
+
+class TestCrashTimingProperties:
+    def test_lists_well_formed(self):
+        config = _make_config()
+        matrix = compute_crash_timing_matrix(
+            config, 3_500.0, [("P", 700_000.0)],
+            offsets=[0, 5, 10, 15], seed=_SEED, n_simulations=_N,
+        )
+        row = matrix.rows[0]
+        assert len(row.survival_by_offset) == 4
+        assert len(row.median_preserved_by_offset) == 4
+        assert len(row.p5_preserved_by_offset) == 4
+        for p in row.survival_by_offset:
+            assert 0.0 <= p <= 1.0
+
+    def test_later_crash_does_not_decrease_survival(self):
+        # A crash landing later (closer to / after pension start) should not be
+        # more damaging than the same crash at retirement day. Uses a stressed
+        # portfolio where survival isn't already saturated at 100%, so the
+        # comparison is meaningful.
+        config = _make_config()
+        matrix = compute_crash_timing_matrix(
+            config, 3_500.0, [("P", 700_000.0)],
+            offsets=[0, 5, 10, 15], seed=_SEED, n_simulations=_N,
+        )
+        row = matrix.rows[0]
+        for prev, curr in zip(row.survival_by_offset, row.survival_by_offset[1:]):
+            assert curr >= prev - 0.05
+
+    def test_offset_zero_matches_survival_matrix_scenario(self):
+        # Crash at offset 0 IS the same scenario compute_survival_matrix reports
+        # under its named label — same seed/wealth/config should match exactly.
+        config = _make_config()
+        infl = (1 + config.expected_inflation_percent / 100) ** config.years
+        target_monthly = config.target_monthly_retirement_income * infl
+        timing = compute_crash_timing_matrix(
+            config, target_monthly, [("P", _PORTFOLIO)],
+            offsets=[0], seed=_SEED, n_simulations=_N,
+        )
+        surface = compute_survival_matrix(
+            config, target_monthly, [("P", _PORTFOLIO)],
+            seed=_SEED, n_simulations=_N,
+        )
+        crash_idx = surface.scenario_labels.index(timing.crash_label)
+        assert timing.rows[0].survival_by_offset[0] == pytest.approx(
+            surface.rows[0].survival_by_scenario[crash_idx], abs=1e-9
+        )

@@ -20,6 +20,8 @@ _FIELDS: list[tuple[str, str, str]] = [
     ("expected_yearly_growth_stocks_percent", "Planning stock CAGR", "%/yr net of TER"),
     ("expected_inflation_percent", "Expected inflation", "%/yr"),
     ("bonds_percentage", "Bonds at retirement", "% of portfolio"),
+    ("yield_bonds", "Bond yield", "%/yr"),
+    ("withdrawal_percentage_stock", "Stock withdrawal rate", "%/yr"),
     ("current_stock_value", "Stocks today", "€"),
     ("current_bonds_value", "Bonds today", "€"),
     ("current_cash", "Cash today", "€"),
@@ -31,7 +33,8 @@ _FIELDS: list[tuple[str, str, str]] = [
 _SECTIONS: list[tuple[str, list[str]]] = [
     ("Scenario", ["target_monthly_retirement_income", "years",
                   "expected_yearly_growth_stocks_percent",
-                  "expected_inflation_percent", "bonds_percentage"]),
+                  "expected_inflation_percent", "bonds_percentage",
+                  "yield_bonds", "withdrawal_percentage_stock"]),
     ("Current assets", ["current_stock_value", "current_bonds_value", "current_cash"]),
     ("Saving", ["annual_net_saving", "stock_monthly_investment_pct",
                 "bonds_monthly_investment_pct"]),
@@ -71,6 +74,10 @@ def _validate(values: dict[str, float]) -> str | None:
             return f"{key} cannot be negative."
     if not 0 <= values["bonds_percentage"] <= 100:
         return "Bonds at retirement must be between 0 and 100."
+    if values["yield_bonds"] <= -100:
+        return "Bond yield must be greater than -100."
+    if values["withdrawal_percentage_stock"] <= 0:
+        return "Stock withdrawal rate must be greater than 0."
     s = values["stock_monthly_investment_pct"]
     b = values["bonds_monthly_investment_pct"]
     if not (0 <= s <= 1 and 0 <= b <= 1):
