@@ -20,6 +20,12 @@ Usage:
   python main.py --from agent        # re-run agent on last captured context
   python main.py --verbose           # pass --verbose to accumulation and decumulation sections
 
+Non-interactive / AI-agent use: every value editable in the GUI dialog is also
+a CLI flag (see `--help`, "plan parameters" group) — passing any of them skips
+the dialog entirely, so an agent can drive the full pipeline without a display:
+  python main.py --no-gui --target-monthly-retirement-income 3000 --years 16 \\
+      --bonds-percentage 50 --current-stock-value 108000 ...
+
 Requires ANTHROPIC_API_KEY in .env for section 4.
 """
 
@@ -28,10 +34,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import os
 import sys
 from pathlib import Path
 
-from models import CagrRealismSnapshot, DecumulationSummary, PlanVerdictSummary
+from models import CagrRealismSnapshot, DecumulationSummary, PlanVerdictSummary, resolve_config_path
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -444,6 +451,8 @@ def run_agent(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    from settings_gui import GUI_FIELDS, apply_cli_overrides
+
     parser = argparse.ArgumentParser(
         description="Unified retirement planning pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -463,13 +472,49 @@ def main() -> None:
                         help="override stock CAGR for all sections "
                              "(accepts 4, 4.0, 0.04, '4%%'); propagated to sub-scripts")
     parser.add_argument("--no-gui", action="store_true",
-                        help="skip the parameter dialog and run with config.toml as-is")
+                        help="skip the parameter dialog and run with config.toml as-is "
+                             "(implied automatically if any plan-parameter flag below is passed)")
+
+    plan_params = parser.add_argument_group(
+        "plan parameters",
+        "Every value editable in the GUI dialog, exposed as a flag for non-interactive "
+        "/ AI-agent use. Passing ANY of these skips the dialog entirely — unspecified "
+        "values keep whatever is already in config.toml.",
+    )
+    for _key, _label, _unit in GUI_FIELDS:
+        plan_params.add_argument(
+            "--" + _key.replace("_", "-"), type=float, default=None,
+            help=f"{_label} ({_unit})".replace("%", "%%"),
+        )
+
     args = parser.parse_args()
 
-    if not args.no_gui:
+    param_overrides = {
+        key: getattr(args, key)
+        for key, _label, _unit in GUI_FIELDS
+        if getattr(args, key) is not None
+    }
+
+    if param_overrides:
+        # Isolate exploratory / AI-agent overrides to a temp copy — never the
+        # real config.toml. Twenty "what if I retire at 60" tool calls should
+        # leave zero permanent mutations of the user's actual plan.
+        import shutil
+        import tempfile
+
+        real_config = Path(resolve_config_path())
+        tmp_dir = Path(tempfile.mkdtemp(prefix="fire_config_"))
+        tmp_config = tmp_dir / "config.toml"
+        shutil.copy(real_config, tmp_config)
+        error = apply_cli_overrides(tmp_config, param_overrides)
+        if error:
+            print(f"Invalid parameter: {error}")
+            return
+        os.environ["FIRE_CONFIG"] = str(tmp_config)
+    elif not args.no_gui:
         try:
             from settings_gui import edit_settings
-            if not edit_settings(Path("config.toml")):
+            if not edit_settings(Path(resolve_config_path())):
                 print("Cancelled — no simulation run.")
                 return
         except Exception as exc:  # headless / tkinter unavailable
@@ -485,7 +530,8 @@ def main() -> None:
     accum_text, decum_text, cagr_text, required_cagr, decum_summary, plan_verdict, realism = _load_context()
     p50 = tail = 0.0
     tail_pct = 3
-    config_toml = Path("config.toml").read_text() if Path("config.toml").exists() else ""
+    _config_path = Path(resolve_config_path())
+    config_toml = _config_path.read_text() if _config_path.exists() else ""
 
     # ── Compute all sections silently, with live progress markers ────────────
     print("RETIREMENT PLAN CHECK — computing… (report prints when all sections finish)")
@@ -506,8 +552,11 @@ def main() -> None:
         print("  [3/3] instruments…", flush=True)
         cagr_text, _opt, realism = run_cagr(planning_cagr=planning_cagr)
 
-    # Cache context for --from agent re-runs
-    _save_context(accum_text, decum_text, cagr_text, required_cagr, decum_summary, plan_verdict, realism)
+    # Cache context for --from agent re-runs — skipped for exploratory CLI-override
+    # runs (param_overrides), so "what if" scenarios never overwrite the real
+    # cached context, run history, or drift tracking.
+    if not param_overrides:
+        _save_context(accum_text, decum_text, cagr_text, required_cagr, decum_summary, plan_verdict, realism)
 
     # ── Verdict first — 30-second top block, fully self-contained ────────────
     print()
@@ -560,17 +609,23 @@ def main() -> None:
     print(cagr_text, end="")
 
     # ── History + drift + footer ──────────────────────────────────────────────
-    joint_P = decum_summary.joint_survival_chained if decum_summary is not None else None
-    _append_history(required_cagr=required_cagr, joint_P=joint_P, p50=p50)
-
+    # Exploratory CLI-override runs never touch run_history.csv or
+    # drift_history.csv either — same "no permanent mutation from a what-if"
+    # guarantee as the config isolation above.
     file_notes: list[str] = []
-    if verdict_inputs is not None:
-        drift_status = _append_drift_snapshot(verdict_inputs, accum_required_it)
-        file_notes.append(f"drift_history.csv ({drift_status})")
-        plot_note = _plot_drift_history()
-        if plot_note:
-            file_notes.append(plot_note)
-    file_notes.append("last_run_context.txt")
+    if not param_overrides:
+        joint_P = decum_summary.joint_survival_chained if decum_summary is not None else None
+        _append_history(required_cagr=required_cagr, joint_P=joint_P, p50=p50)
+
+        if verdict_inputs is not None:
+            drift_status = _append_drift_snapshot(verdict_inputs, accum_required_it)
+            file_notes.append(f"drift_history.csv ({drift_status})")
+            plot_note = _plot_drift_history()
+            if plot_note:
+                file_notes.append(plot_note)
+        file_notes.append("last_run_context.txt")
+    else:
+        file_notes.append("none (exploratory run — config/history untouched)")
 
     print()
     print("─" * 80)

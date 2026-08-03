@@ -2422,7 +2422,8 @@ def main() -> None:
     shrink_mean_intensity: float = 0.5  # default; overwritten from config if loaded
     try:
         import tomllib
-        with open("config.toml", "rb") as _f:
+        from models import resolve_config_path
+        with open(resolve_config_path(), "rb") as _f:
             _raw_cfg = tomllib.load(_f)
         cfg_raw: dict                     = _raw_cfg
         benchmark_tickers: list[str]      = _raw_cfg.get("benchmark_index", [])
@@ -2431,7 +2432,10 @@ def main() -> None:
         cape_ratio: float | None          = _raw_cfg.get("cape_ratio", None)
         cape_long_run_mean: float         = float(_raw_cfg.get("cape_long_run_mean", 17.0))
         cape_eps_growth: float            = float(_raw_cfg.get("cape_eps_growth", 0.015))
+        _fast_mc: bool                    = bool(_raw_cfg.get("fast_mc", False))
         cape_n_simulations: int           = int(_raw_cfg.get("cape_n_simulations", 50_000))
+        if _fast_mc:
+            cape_n_simulations = max(int(cape_n_simulations * 0.1), 100)
         horizon_years: int                = int(_raw_cfg.get("years", 15))
         inflation: float                  = float(_raw_cfg.get("expected_inflation_percent", 2.3)) / 100
         config_stock_cagr: float          = float(_raw_cfg.get("expected_yearly_growth_stocks_percent", 6.0)) / 100

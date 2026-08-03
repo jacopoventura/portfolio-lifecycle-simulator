@@ -1,4 +1,18 @@
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
+
+
+def resolve_config_path(default: str | Path = "config.toml") -> str:
+    """Path to config.toml, honoring the FIRE_CONFIG env var.
+
+    Lets the whole pipeline be pointed at an isolated copy — e.g. an AI agent
+    exploring "what if I retire at 60" via main.py's CLI overrides writes a
+    merged config to a temp file and sets FIRE_CONFIG, instead of mutating the
+    user's real config.toml. Every module that loads config.toml should resolve
+    its path through this function rather than hardcoding the literal name.
+    """
+    return os.environ.get("FIRE_CONFIG", str(default))
 
 
 @dataclass
@@ -31,6 +45,10 @@ class Config:
     mc_inflation_std_percent: float
     mc_bond_yield_std_percent: float
     mc_target_success_percent: int
+    # Dev/iteration speed toggle: when True, every mc_*_n_simulations field and
+    # grid-step field below is rescaled at load time (10% of the sims, ~10x
+    # coarser grid steps) — see Config.from_dict. Never set for a real answer.
+    fast_mc: bool = False
     mc_inflation_ar1_phi: float = 0.0
     mc_decumulation_years: int = 40
     mc_decumulation_stock_pct: float = 0.40  # derived from bonds_percentage; kept for override
@@ -86,6 +104,16 @@ class Config:
 
     @classmethod
     def from_dict(cls, config: dict[str, object]) -> "Config":
+        fast_mc = bool(config.get("fast_mc", False))
+
+        def _mc_scale(n: int) -> int:
+            """10% of n when fast_mc is on (dev/iteration speed), floored at 100."""
+            return max(int(n * 0.1), 100) if fast_mc else n
+
+        def _grid_scale(step: float) -> float:
+            """~10x coarser grid steps when fast_mc is on (fewer grid points)."""
+            return step * 10.0 if fast_mc else step
+
         return cls(
             current_stock_value=float(config["current_stock_value"]),
             current_bonds_value=float(config.get("current_bonds_value", 0.0)),
@@ -113,22 +141,23 @@ class Config:
             basiszins=float(config.get("basiszins", 0.0229)),
             freibetrag=float(config.get("freibetrag", 1000.0)),
             teilfreistellung=float(config.get("teilfreistellung", 0.7)),
-            optimize_grid_step=float(config.get("optimize_grid_step", 50000.0)),
-            mc_n_simulations=int(config.get("mc_n_simulations", 10000)),
+            fast_mc=fast_mc,
+            optimize_grid_step=_grid_scale(float(config.get("optimize_grid_step", 50000.0))),
+            mc_n_simulations=_mc_scale(int(config.get("mc_n_simulations", 10000))),
             mc_stock_return_std_percent=float(config.get("mc_stock_return_std_percent", 15.0)),
             mc_inflation_std_percent=float(config.get("mc_inflation_std_percent", 3.0)),
             mc_bond_yield_std_percent=float(config.get("mc_bond_yield_std_percent", 1.0)),
             mc_target_success_percent=int(config.get("mc_target_success_percent", 95)),
             mc_grid_cagr_min=float(config.get("mc_grid_cagr_min", 0.03)),
             mc_grid_cagr_max=float(config.get("mc_grid_cagr_max", 0.09)),
-            mc_grid_cagr_step=float(config.get("mc_grid_cagr_step", 0.01)),
+            mc_grid_cagr_step=_grid_scale(float(config.get("mc_grid_cagr_step", 0.01))),
             mc_inflation_ar1_phi=float(config.get("mc_inflation_ar1_phi", 0.0)),
             mc_decumulation_years=int(config.get("mc_decumulation_years", 40)),
             mc_decumulation_stock_pct=float(config.get(
                 "mc_decumulation_stock_pct",
                 1.0 - float(config["bonds_percentage"]) / 100.0,
             )),
-            mc_decumulation_n_simulations=int(config.get("mc_decumulation_n_simulations", 10_000)),
+            mc_decumulation_n_simulations=_mc_scale(int(config.get("mc_decumulation_n_simulations", 10_000))),
             mc_decumulation_pension_start_year=int(config.get("mc_decumulation_pension_start_year", 15)),
             mc_decumulation_pension_monthly=float(config.get("mc_decumulation_pension_monthly", 2_500.0)),
             mc_decumulation_pension_adjustment_rate=float(config.get("mc_decumulation_pension_adjustment_rate", 0.0)),
@@ -141,7 +170,7 @@ class Config:
             fi_preservation_confidence_baseline=float(config.get("fi_preservation_confidence_baseline", 0.95)),
             fi_preservation_confidence_stress=float(config.get("fi_preservation_confidence_stress", 0.50)),
             decum_teilfreistellung=float(config.get("decum_teilfreistellung", 1.0)),
-            mc_grid_n_simulations=int(config.get("mc_grid_n_simulations", 15_000)),
+            mc_grid_n_simulations=_mc_scale(int(config.get("mc_grid_n_simulations", 15_000))),
             mc_grid_contribution_max=float(config.get("mc_grid_contribution_max", 7_000.0)),
             mc_stock_return_df=float(config.get("mc_stock_return_df", 1000.0)),
             mc_stock_bond_correlation=float(config.get("mc_stock_bond_correlation", 0.0)),

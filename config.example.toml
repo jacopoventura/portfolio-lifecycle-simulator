@@ -39,6 +39,7 @@ teilfreistellung = 0.7    # 70% for equity ETFs, 85% for mixed funds, 100% for b
 optimize_grid_step = 50000.0   # cash redeployment step size in €
 
 # Monte Carlo
+fast_mc = false  # true = 10% of every MC's n_simulations + ~10x coarser grid steps (dev/iteration speed only — never for a real answer)
 mc_n_simulations = 50000
 mc_stock_return_std_percent = 15.0
 mc_inflation_std_percent = 2.0

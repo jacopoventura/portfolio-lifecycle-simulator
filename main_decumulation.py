@@ -24,7 +24,7 @@ Usage:
 import argparse
 import tomllib
 
-from models import Config, DecumulationSummary
+from models import Config, DecumulationSummary, resolve_config_path
 from monte_carlo import (
     compute_canonical_fi_required_scan,
     compute_crash_timing_matrix,
@@ -49,15 +49,15 @@ from reports.section4 import (
 )
 
 
-def _load_config(path: str = "config.toml") -> Config:
-    with open(path, "rb") as f:
+def _load_config(path: str | None = None) -> Config:
+    with open(path or resolve_config_path(), "rb") as f:
         raw = tomllib.load(f)
     return Config.from_dict(raw)
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Monte Carlo decumulation — focused preservation")
-    p.add_argument("--config", default="config.toml", help="Path to config file")
+    p.add_argument("--config", default=None, help="Path to config file (default: FIRE_CONFIG env var, else config.toml)")
     p.add_argument("--portfolio", type=float, default=None,
                    help="Starting wealth for §4.10/§4.11 supporting context (defaults to IT required portfolio)")
     p.add_argument("--seed", type=int, default=42)
@@ -74,7 +74,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main(
     *,
-    config_path: str = "config.toml",
+    config_path: str | None = None,
     portfolio_override: float | None = None,
     seed: int = 42,
     no_clear: bool = False,
@@ -139,7 +139,7 @@ def main(
         confidence=config.fi_preservation_confidence_baseline,
         preserve_ratio=config.fi_preservation_ratio,
         seed=seed,
-        n_simulations=2_000,
+        n_simulations=min(n, 2_000),
     )
 
     # ── Preservation-ratio sensitivity — always computed (plan-check needs it) ─
@@ -177,7 +177,9 @@ def main(
         )
 
         print("Computing inflation × CAGR sensitivity…", flush=True)
-        decum_grid = compute_decum_inflation_cagr_grid(config, display_portfolio, seed=seed)
+        decum_grid = compute_decum_inflation_cagr_grid(
+            config, display_portfolio, seed=seed, n_simulations=min(n, 5_000),
+        )
         print_decum_inflation_cagr_heatmap(decum_grid)
 
         print("Computing wealth preservation under SORR…", flush=True)
@@ -186,6 +188,7 @@ def main(
             initial_wealth=display_portfolio,
             target_monthly_nom=target_monthly_nom,
             seed=seed,
+            n_simulations=min(n, 10_000),
         )
         print_wealth_preservation_under_sorr(wealth_surface)
 
@@ -194,6 +197,7 @@ def main(
             config,
             target_monthly_nom,
             seed=seed,
+            n_simulations=min(n, 5_000),
         )
         print_price_of_constraint_matrix(constraint_matrix)
 
@@ -202,6 +206,7 @@ def main(
             config,
             target_monthly_nom,
             seed=seed,
+            n_simulations=min(n, 5_000),
         )
         print_two_bucket_comparison(two_bucket)
         wealth_points.append(("two-bucket total", two_bucket.required_total_wealth))
@@ -215,6 +220,7 @@ def main(
         target_monthly_nom,
         wealth_points,
         seed=seed,
+        n_simulations=min(n, 5_000),
     )
     print_survival_matrix(survival_matrix)
 
@@ -225,6 +231,7 @@ def main(
             target_monthly_nom,
             wealth_points,
             seed=seed,
+            n_simulations=min(n, 5_000),
         )
         print_crash_timing_matrix(crash_timing)
 

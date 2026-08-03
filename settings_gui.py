@@ -1,4 +1,6 @@
-"""Plan-lever settings dialog shown by main.py before the pipeline runs.
+"""Plan-lever settings — either an interactive dialog shown by main.py before
+the pipeline runs, or non-interactive overrides for scripted / AI-agent use
+(main.py --<param> flags, generated from GUI_FIELDS below skip the dialog).
 
 Exposes only the plan levers (portfolio, saving, horizon, target income,
 CAGR/inflation, bonds split) — config.toml stays the source of truth for
@@ -13,8 +15,8 @@ import tomllib
 from pathlib import Path
 
 
-# (toml key, label, unit hint)
-_FIELDS: list[tuple[str, str, str]] = [
+# (toml key, label, unit hint) — also drives main.py's --<param> CLI flags.
+GUI_FIELDS: list[tuple[str, str, str]] = [
     ("target_monthly_retirement_income", "Target retirement income", "€/mo today's €"),
     ("years", "Years to retirement", "y"),
     ("expected_yearly_growth_stocks_percent", "Planning stock CAGR", "%/yr net of TER"),
@@ -28,6 +30,10 @@ _FIELDS: list[tuple[str, str, str]] = [
     ("annual_net_saving", "Annual net saving", "€/yr"),
     ("stock_monthly_investment_pct", "Saving share → stocks", "0–1"),
     ("bonds_monthly_investment_pct", "Saving share → bonds", "0–1"),
+    ("mc_decumulation_years", "Decumulation horizon", "y"),
+    ("fi_preservation_ratio", "Preservation ratio", "0–1 (fraction of capital)"),
+    ("fi_preservation_confidence_baseline", "Preservation confidence (baseline)", "0–1"),
+    ("fi_preservation_confidence_stress", "Preservation confidence (worst-SORR)", "0–1"),
 ]
 
 _SECTIONS: list[tuple[str, list[str]]] = [
@@ -38,6 +44,9 @@ _SECTIONS: list[tuple[str, list[str]]] = [
     ("Current assets", ["current_stock_value", "current_bonds_value", "current_cash"]),
     ("Saving", ["annual_net_saving", "stock_monthly_investment_pct",
                 "bonds_monthly_investment_pct"]),
+    ("Preservation", ["mc_decumulation_years", "fi_preservation_ratio",
+                       "fi_preservation_confidence_baseline",
+                       "fi_preservation_confidence_stress"]),
 ]
 
 
@@ -84,6 +93,36 @@ def _validate(values: dict[str, float]) -> str | None:
         return "Saving shares must be between 0 and 1."
     if s + b > 1.0 + 1e-9:
         return "Stock + bond saving shares exceed 1 (the rest goes to cash)."
+    if values["mc_decumulation_years"] <= 0:
+        return "Decumulation horizon must be positive."
+    if not 0 <= values["fi_preservation_ratio"] <= 1:
+        return "Preservation ratio must be between 0 and 1."
+    if not 0 <= values["fi_preservation_confidence_baseline"] <= 1:
+        return "Preservation confidence (baseline) must be between 0 and 1."
+    if not 0 <= values["fi_preservation_confidence_stress"] <= 1:
+        return "Preservation confidence (worst-SORR) must be between 0 and 1."
+    return None
+
+
+def apply_cli_overrides(config_path: Path, overrides: dict[str, float]) -> str | None:
+    """Non-interactive equivalent of the GUI dialog: write `overrides` (a
+    subset of GUI_FIELDS keys) into config.toml, validated the same way.
+
+    Returns an error message if the resulting plan levers are inconsistent
+    (nothing is written in that case), or None on success. No-op if
+    `overrides` is empty. Used by main.py when called with plan-parameter
+    flags (e.g. from an AI agent) instead of the interactive dialog.
+    """
+    if not overrides:
+        return None
+    raw = config_path.read_text()
+    parsed = tomllib.loads(raw)
+    values = {key: float(parsed[key]) for key, _label, _unit in GUI_FIELDS}
+    values.update(overrides)
+    error = _validate(values)
+    if error:
+        return error
+    config_path.write_text(replace_toml_values(raw, overrides))
     return None
 
 
@@ -102,7 +141,7 @@ def edit_settings(config_path: Path) -> bool:
 
     result = {"run": False}
     entries: dict[str, tk.StringVar] = {}
-    labels = {key: (label, unit) for key, label, unit in _FIELDS}
+    labels = {key: (label, unit) for key, label, unit in GUI_FIELDS}
 
     outer = ttk.Frame(root, padding=12)
     outer.grid(sticky="nsew")

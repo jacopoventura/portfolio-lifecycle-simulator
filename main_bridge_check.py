@@ -15,7 +15,7 @@ import argparse
 import dataclasses
 import tomllib
 
-from models import Config
+from models import Config, resolve_config_path
 from monte_carlo import compute_canonical_fi_required_scan
 
 # Example: the 2026-08-03 session bridge (old preservation params -> current).
@@ -32,8 +32,8 @@ STEPS: list[tuple[str, dict]] = [
 ]
 
 
-def _load_config(path: str) -> Config:
-    with open(path, "rb") as f:
+def _load_config(path: str | None = None) -> Config:
+    with open(path or resolve_config_path(), "rb") as f:
         raw = tomllib.load(f)
     return Config.from_dict(raw)
 
@@ -51,7 +51,7 @@ def _print_table(rows: list[tuple[str, float, float, float, float, float]]) -> N
 
 def main(
     *,
-    config_path: str = "config.toml",
+    config_path: str | None = None,
     n_simulations: int = 4000,
     hi: float = 15_000_000.0,
     seed: int = 42,
@@ -83,7 +83,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(
         description="Bridge check: stack config overrides and show the required-wealth impact of each"
     )
-    p.add_argument("--config", default="config.toml", help="Path to config file")
+    p.add_argument("--config", default=None, help="Path to config file (default: FIRE_CONFIG env var, else config.toml)")
     p.add_argument("--n-simulations", type=int, default=4000)
     p.add_argument("--hi", type=float, default=15_000_000.0, help="Upper search bound in EUR")
     p.add_argument("--seed", type=int, default=42)

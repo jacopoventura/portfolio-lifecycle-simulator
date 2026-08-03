@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from settings_gui import _FIELDS, _validate, replace_toml_values
+from settings_gui import GUI_FIELDS, _validate, apply_cli_overrides, replace_toml_values
 
 _SAMPLE = """# Scenario
 target_monthly_retirement_income = 3000.0  # monthly income in retirement (today's money)
@@ -55,7 +55,7 @@ class TestReplaceTomlValues:
     def test_all_gui_fields_exist_in_real_config(self):
         raw = (Path(__file__).parent.parent / "config.toml").read_text()
         parsed = tomllib.loads(raw)
-        for key, _label, _unit in _FIELDS:
+        for key, _label, _unit in GUI_FIELDS:
             assert key in parsed, f"GUI field {key} missing from config.toml"
             # Round-trip each field through the writer at its current value.
             out = replace_toml_values(raw, {key: float(parsed[key])})
@@ -78,6 +78,10 @@ class TestValidate:
             "annual_net_saving": 24000.0,
             "stock_monthly_investment_pct": 0.6,
             "bonds_monthly_investment_pct": 0.25,
+            "mc_decumulation_years": 30.0,
+            "fi_preservation_ratio": 0.75,
+            "fi_preservation_confidence_baseline": 0.91,
+            "fi_preservation_confidence_stress": 0.80,
         }
         base.update(overrides)
         return base
@@ -109,3 +113,59 @@ class TestValidate:
         assert _validate(self._values(
             stock_monthly_investment_pct=0.7, bonds_monthly_investment_pct=0.3
         )) is None
+
+    def test_decumulation_horizon_must_be_positive(self):
+        assert _validate(self._values(mc_decumulation_years=0)) is not None
+
+    def test_preservation_ratio_bounds(self):
+        assert _validate(self._values(fi_preservation_ratio=1.5)) is not None
+        assert _validate(self._values(fi_preservation_ratio=-0.1)) is not None
+
+    def test_preservation_confidence_bounds(self):
+        assert _validate(self._values(fi_preservation_confidence_baseline=1.5)) is not None
+        assert _validate(self._values(fi_preservation_confidence_stress=-0.1)) is not None
+
+
+class TestApplyCliOverrides:
+    """Non-interactive equivalent of the GUI dialog — used by main.py's
+    plan-parameter CLI flags (AI-agent / scripted use, no display needed)."""
+
+    @pytest.fixture
+    def config_copy(self, tmp_path) -> Path:
+        real = Path(__file__).parent.parent / "config.toml"
+        dest = tmp_path / "config.toml"
+        dest.write_text(real.read_text())
+        return dest
+
+    def test_empty_overrides_is_noop(self, config_copy):
+        original = config_copy.read_text()
+        assert apply_cli_overrides(config_copy, {}) is None
+        assert config_copy.read_text() == original
+
+    def test_valid_override_writes_and_preserves_comment(self, config_copy):
+        error = apply_cli_overrides(config_copy, {"years": 20.0})
+        assert error is None
+        assert "years = 20   # investment horizon in years" in config_copy.read_text()
+
+    def test_invalid_override_returns_error_and_writes_nothing(self, config_copy):
+        original = config_copy.read_text()
+        error = apply_cli_overrides(config_copy, {"years": -5.0})
+        assert error is not None
+        assert config_copy.read_text() == original
+
+    def test_multiple_overrides_applied_together(self, config_copy):
+        error = apply_cli_overrides(
+            config_copy, {"years": 20.0, "bonds_percentage": 60.0}
+        )
+        assert error is None
+        parsed = tomllib.loads(config_copy.read_text())
+        assert parsed["years"] == 20
+        assert parsed["bonds_percentage"] == 60
+
+    def test_invalid_combination_across_fields_rejected(self, config_copy):
+        # Individually valid saving shares that together exceed 1.
+        error = apply_cli_overrides(
+            config_copy,
+            {"stock_monthly_investment_pct": 0.8, "bonds_monthly_investment_pct": 0.5},
+        )
+        assert error is not None

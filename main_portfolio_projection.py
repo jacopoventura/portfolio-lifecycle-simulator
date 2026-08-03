@@ -28,6 +28,7 @@ from models import (
     SensitivityWaterfallResult,
     VerdictInputs,
     YearsToTargetsResult,
+    resolve_config_path,
 )
 from monte_carlo import (
     _OPTIMIZE_N_SIMULATIONS,
@@ -304,7 +305,7 @@ def _parse_args() -> argparse.Namespace:
 
 def _load_config() -> tuple[Config, str] | None:
     """Load config.toml. On error, print a user-facing message and return None."""
-    config_path = Path(__file__).with_name("config.toml")
+    config_path = Path(resolve_config_path(Path(__file__).with_name("config.toml")))
     try:
         with config_path.open("rb") as f:
             config = Config.from_dict(tomllib.load(f))
