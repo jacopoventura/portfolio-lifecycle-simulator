@@ -71,7 +71,7 @@ lifespan_age = 94                           # planning lifespan; decum horizon =
 # P(final ≥ fi_preservation_ratio × initial) clears both confidence thresholds:
 #   - baseline (random returns)
 #   - worst-SORR (currently the 2000-2002 lost-decade sequence)
-fi_preservation_ratio              = 0.66  # preserve at least 65% of initial real wealth at horizon ("consume gains, preserve cost basis")
+fi_preservation_ratio              = 0.75  # preserve at least 75% of initial real wealth at horizon
 fi_preservation_confidence_baseline = 0.91  # required P under random returns
 fi_preservation_confidence_stress   = 0.50  # required P under the worst-case SORR scenario
 

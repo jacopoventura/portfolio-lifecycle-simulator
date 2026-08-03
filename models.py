@@ -137,7 +137,7 @@ class Config:
                 1.0 - float(config["bonds_percentage"]) / 100.0,  # default = start = no glide
             )),
             mc_decumulation_glide_years=int(config.get("mc_decumulation_glide_years", 0)),
-            fi_preservation_ratio=float(config.get("fi_preservation_ratio", 0.50)),
+            fi_preservation_ratio=float(config.get("fi_preservation_ratio", 0.75)),
             fi_preservation_confidence_baseline=float(config.get("fi_preservation_confidence_baseline", 0.95)),
             fi_preservation_confidence_stress=float(config.get("fi_preservation_confidence_stress", 0.50)),
             decum_teilfreistellung=float(config.get("decum_teilfreistellung", 1.0)),
