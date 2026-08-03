@@ -563,6 +563,39 @@ class CanonicalFIRequiredScan:
     canonical_reachable: bool            # was the canonical bar achievable in search range?
 
 
+@dataclass
+class PriceOfConstraintRow:
+    """One preserve_ratio row of the price-of-constraint matrix.
+
+    Isolates the € cost of the worst-historic-sequence (SORR) confidence floor
+    from baseline-only preservation, at a fixed preserve_ratio X.
+    """
+    preserve_ratio: float                # X (decimal: 0.50 → 0.75)
+    baseline_only_wealth: float           # W*(X) with only the baseline confidence enforced
+    baseline_stress_wealth: float         # W*(X) with baseline AND worst-SORR confidence enforced
+    delta_wealth: float                   # baseline_stress_wealth - baseline_only_wealth
+    baseline_only_reachable: bool
+    baseline_stress_reachable: bool
+
+
+@dataclass
+class PriceOfConstraintMatrix:
+    """Price of the SORR safety layer: W*(X) with vs. without the worst-historic-
+    sequence confidence floor, at each preserve_ratio X.
+
+    Both columns come from compute_canonical_fi_required_scan() run with
+    identical seed/grid/bounds — the baseline-only column just forces
+    confidence_stress to 0 so the stress constraint never binds. This isolates
+    the € cost of the stress-safety layer from any other implementation detail.
+    """
+    horizon_years: int
+    target_monthly_withdrawal: float
+    confidence_baseline: float            # Y from config
+    confidence_stress: float              # Z from config (the layer being priced)
+    worst_stress_label: str               # which SORR sequence binds the stress column
+    rows: list[PriceOfConstraintRow]      # one per preserve_ratio
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TARGET PORTFOLIO TERMINOLOGY — three distinct concepts, do not confuse.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -587,8 +620,11 @@ class CanonicalFIRequiredScan:
 #
 # 3. "Stress-preservation required portfolio"  (short: "Canonical FI bar")
 #       compute_canonical_fi_required_scan() → CanonicalFIRequiredScan
-#       NOT computed by the default pipeline (removed from main.py 2026-07:
-#       nothing downstream consumed it; call it directly if the number is needed).
+#       Not part of the Takeaway pipeline (removed from main.py 2026-07: nothing
+#       downstream consumed it directly); its € cost over #2 is what §4.12
+#       "Price of the SORR Safety Layer" (compute_price_of_constraint_matrix())
+#       reports in --verbose mode. Call compute_canonical_fi_required_scan()
+#       directly if the raw dual-confidence number itself is needed.
 #       = same as #2 PLUS a worst-SORR confidence floor (dual-confidence).
 #       Question: "Same as #2 but also robust under historic crash sequences?"
 #       For user's config: ~€6.10M (higher than #2 by the SORR margin).
@@ -597,7 +633,7 @@ class CanonicalFIRequiredScan:
 # see feedback 2026-05-24 — preservation lives in decum's tradeoff table).
 # Decumulation reports #1 as the anchor for Q1 ("does the survival bar also
 # preserve?") and #2 as the answer to Q3 ("what wealth would preserve at the
-# target confidence?"). #3 remains available on demand for stress framing.
+# target confidence?"). #3's € premium over #2 is surfaced via §4.12.
 # ─────────────────────────────────────────────────────────────────────────────
 
 

@@ -27,6 +27,7 @@ from models import Config, DecumulationSummary
 from monte_carlo import (
     compute_decum_inflation_cagr_grid,
     compute_focused_preservation_table,
+    compute_price_of_constraint_matrix,
     compute_wealth_preservation_under_sorr,
     compute_years_to_retirement_tradeoff,
 )
@@ -35,6 +36,7 @@ from reports.section4 import (
     print_decum_inflation_cagr_heatmap,
     print_focused_preservation_table,
     print_focused_takeaway,
+    print_price_of_constraint_matrix,
     print_wealth_preservation_under_sorr,
 )
 
@@ -152,6 +154,14 @@ def main(
             seed=seed,
         )
         print_wealth_preservation_under_sorr(wealth_surface)
+
+        print("Computing price of the SORR safety layer…", flush=True)
+        constraint_matrix = compute_price_of_constraint_matrix(
+            config,
+            target_monthly_nom,
+            seed=seed,
+        )
+        print_price_of_constraint_matrix(constraint_matrix)
 
     # ── Takeaway (always printed; LAST block) ────────────────────────────────
     print_focused_takeaway(focused, tradeoff=tradeoff, config=config)

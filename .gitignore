@@ -21,3 +21,8 @@ historical_data/last_run_summaries.json
 historical_data/run_history.csv
 historical_data/drift_history.csv
 historical_data/drift_history.png
+
+CLAUDE.md
+
+# Personal documents — never commit
+*.docx

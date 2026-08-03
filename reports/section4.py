@@ -3,10 +3,16 @@ from models import (
     DecumInflationCagrCell,
     DecumInflationCagrGrid,
     FocusedPreservationTable,
+    PriceOfConstraintMatrix,
     WealthPreservationUnderSORR,
     YearsToRetirementTradeoff,
 )
-from reports.formatters import _print_section, _print_subsection, format_currency
+from reports.formatters import (
+    _print_section,
+    _print_subsection,
+    format_currency,
+    format_currency_signed,
+)
 
 
 def print_focused_preservation_table(table: FocusedPreservationTable) -> None:
@@ -342,3 +348,45 @@ def print_wealth_preservation_under_sorr(surface: WealthPreservationUnderSORR) -
           f"({med_retention:>5.1f}% of initial)")
     print(f"    Good luck (P97): €{format_currency(surface.bridge_p97):>12}")
     print(f"    Survival to yr-{by}: {surface.bridge_survival * 100:.1f}%")
+
+
+def print_price_of_constraint_matrix(matrix: PriceOfConstraintMatrix) -> None:
+    _print_subsection(
+        f"4.12  Price of the SORR Safety Layer (yr-{matrix.horizon_years})"
+    )
+    print()
+    conf_b = int(round(matrix.confidence_baseline * 100))
+    conf_s = int(round(matrix.confidence_stress * 100))
+    print(f"  Required wealth W*(X) to preserve X% of real terminal wealth, with vs.")
+    print(f"  without the worst-historic-sequence ({matrix.worst_stress_label}) confidence floor:")
+    print(f"    Baseline-only    : P(real final ≥ X·W | baseline)  ≥ {conf_b}%")
+    print(f"    Baseline+stress  : also P(real final ≥ X·W | worst SORR) ≥ {conf_s}%")
+    print()
+
+    col_w = 14
+    header = (f"  {'Preserve X':<12}  {'Baseline-only':>{col_w}}  "
+              f"{'Baseline+stress':>{col_w}}  {'Price of safety':>{col_w}}")
+    print(header)
+    print("  " + "─" * (12 + 2 + (col_w + 2) * 3))
+
+    for row in matrix.rows:
+        x_pct = f"{int(round(row.preserve_ratio * 100))}%"
+        b_only = f"€{format_currency(row.baseline_only_wealth)}" + ("" if row.baseline_only_reachable else "*")
+        b_stress = f"€{format_currency(row.baseline_stress_wealth)}" + ("" if row.baseline_stress_reachable else "*")
+        delta = f"€{format_currency_signed(row.delta_wealth)}"
+        print(f"  {x_pct:<12}  {b_only:>{col_w}}  {b_stress:>{col_w}}  {delta:>{col_w}}")
+
+    if any(not r.baseline_only_reachable or not r.baseline_stress_reachable for r in matrix.rows):
+        print()
+        print("  * = not reachable within the search range (reported at the search ceiling).")
+
+    print()
+    if all(abs(r.delta_wealth) < 1e-6 for r in matrix.rows):
+        print(f"  Price of safety is €0 at every X: the baseline confidence ({conf_b}%) is already")
+        print(f"  strict enough that it swamps the stress floor ({conf_s}%) — the worst-historic-")
+        print("  sequence requirement never binds at this configuration. Raising confidence_stress")
+        print("  (or lowering confidence_baseline) would make the safety layer bite and show a gap.")
+    else:
+        print("  Each row's 'Price of safety' is the € the worst-historic-sequence")
+        print("  confidence floor adds on top of baseline-only preservation at that X —")
+        print("  the number a bequest-bucket-style structure would need to beat.")

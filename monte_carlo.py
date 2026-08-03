@@ -40,6 +40,8 @@ from models import (
     CanonicalFIRequiredRow,
     CanonicalFIRequiredScan,
     FocusedPreservationTable,
+    PriceOfConstraintMatrix,
+    PriceOfConstraintRow,
     YearsToRetirementRow,
     YearsToRetirementTradeoff,
     SORRResult,
@@ -2497,6 +2499,69 @@ def compute_canonical_fi_required_scan(
         canonical_required_wealth=canonical_row.required_wealth_eur,
         canonical_optimal_bonds_pct=canonical_row.optimal_bonds_pct,
         canonical_reachable=canonical_row.reachable,
+    )
+
+
+def compute_price_of_constraint_matrix(
+    config: Config,
+    target_monthly_nom: float,
+    *,
+    preserve_ratios: list[float] | None = None,
+    bonds_pct_grid: list[float] | None = None,
+    lo: float = 100_000.0,
+    hi: float = 10_000_000.0,
+    tolerance: float = 5_000.0,
+    seed: int = 42,
+    n_simulations: int = 5_000,
+) -> PriceOfConstraintMatrix:
+    """How many € does surviving a historic crash sequence cost, on top of
+    baseline-only preservation?
+
+    Runs compute_canonical_fi_required_scan() twice with identical seed/grid/
+    bounds so the two columns are directly comparable cell-by-cell:
+      • baseline-only   : confidence_stress forced to 0 → stress constraint
+                          never binds, so W*(X) reflects baseline confidence alone.
+      • baseline+stress : config as-is (both confidences enforced).
+
+    The gap between the two columns, at each preserve_ratio X, is the € price
+    of the worst-historic-sequence safety layer — the number the two-bucket
+    argument needs to be tested against.
+    """
+    if preserve_ratios is None:
+        preserve_ratios = [0.50, 0.75]
+
+    baseline_only_config = _dc_replace(config, fi_preservation_confidence_stress=0.0)
+
+    baseline_scan = compute_canonical_fi_required_scan(
+        baseline_only_config, target_monthly_nom,
+        preserve_ratios=preserve_ratios, bonds_pct_grid=bonds_pct_grid,
+        lo=lo, hi=hi, tolerance=tolerance, seed=seed, n_simulations=n_simulations,
+    )
+    stress_scan = compute_canonical_fi_required_scan(
+        config, target_monthly_nom,
+        preserve_ratios=preserve_ratios, bonds_pct_grid=bonds_pct_grid,
+        lo=lo, hi=hi, tolerance=tolerance, seed=seed, n_simulations=n_simulations,
+    )
+
+    rows = [
+        PriceOfConstraintRow(
+            preserve_ratio=b_row.preserve_ratio,
+            baseline_only_wealth=b_row.required_wealth_eur,
+            baseline_stress_wealth=s_row.required_wealth_eur,
+            delta_wealth=s_row.required_wealth_eur - b_row.required_wealth_eur,
+            baseline_only_reachable=b_row.reachable,
+            baseline_stress_reachable=s_row.reachable,
+        )
+        for b_row, s_row in zip(baseline_scan.rows, stress_scan.rows)
+    ]
+
+    return PriceOfConstraintMatrix(
+        horizon_years=stress_scan.horizon_years,
+        target_monthly_withdrawal=target_monthly_nom,
+        confidence_baseline=config.fi_preservation_confidence_baseline,
+        confidence_stress=config.fi_preservation_confidence_stress,
+        worst_stress_label=stress_scan.worst_stress_label,
+        rows=rows,
     )
 
 
