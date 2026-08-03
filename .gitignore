@@ -9,6 +9,7 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+.DS_Store
 
 # Personal financial data — real values live only in your local config.toml.
 # Committed template is config.example.toml.
