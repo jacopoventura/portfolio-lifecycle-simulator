@@ -132,10 +132,18 @@ class TestApplyCliOverrides:
 
     @pytest.fixture
     def config_copy(self, tmp_path) -> Path:
-        real = Path(__file__).parent.parent / "config.toml"
+        # Built from the COMMITTED template, not the gitignored real config.
+        # Reading config.toml here coupled the suite to private state: the
+        # tests passed locally and failed in CI, where config.toml is a copy
+        # of the template with different inline comments.
+        template = Path(__file__).parent.parent / "config.example.toml"
         dest = tmp_path / "config.toml"
-        dest.write_text(real.read_text())
+        dest.write_text(template.read_text())
         return dest
+
+    @staticmethod
+    def _line_for(text: str, key: str) -> str:
+        return next(l for l in text.splitlines() if l.startswith(f"{key} "))
 
     def test_empty_overrides_is_noop(self, config_copy):
         original = config_copy.read_text()
@@ -143,9 +151,18 @@ class TestApplyCliOverrides:
         assert config_copy.read_text() == original
 
     def test_valid_override_writes_and_preserves_comment(self, config_copy):
-        error = apply_cli_overrides(config_copy, {"years": 20.0})
+        # Assert on behaviour (value written, inline comment kept) rather than
+        # on one config's exact comment text.
+        original_comment = self._line_for(config_copy.read_text(), "years").split("#", 1)[1]
+
+        error = apply_cli_overrides(config_copy, {"years": 18.0})
+
         assert error is None
-        assert "years = 20   # investment horizon in years" in config_copy.read_text()
+        updated = config_copy.read_text()
+        years_line = self._line_for(updated, "years")
+        assert years_line.startswith("years = 18")
+        assert years_line.split("#", 1)[1] == original_comment
+        assert tomllib.loads(updated)["years"] == 18
 
     def test_invalid_override_returns_error_and_writes_nothing(self, config_copy):
         original = config_copy.read_text()

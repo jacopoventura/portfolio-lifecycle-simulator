@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Pre-commit: privacy guard first, then syntax check.
+# Enable once per clone with:  git config core.hooksPath hooks
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
+
+# ── 1. Privacy: personal data and secrets must never enter history ───────────
+# shellcheck source=hooks/privacy-guard.sh
+source "$REPO_ROOT/hooks/privacy-guard.sh"
+privacy_guard || exit 1
+
+# ── 2. Syntax: nothing that fails to compile gets committed ──────────────────
+if [ ! -x "$VENV_PYTHON" ]; then
+    echo "[pre-commit] WARNING: .venv not found — skipping syntax check."
+    echo "             (privacy guard above still ran)"
+    exit 0
+fi
+
+echo "[pre-commit] Byte-compiling Python files…"
+if ! "$VENV_PYTHON" -m compileall -q -x '\.venv|historical_data|__pycache__' "$REPO_ROOT"; then
+    echo ""
+    echo "[pre-commit] COMMIT BLOCKED: SyntaxError. Fix it before committing."
+    exit 1
+fi
+
+exit 0
