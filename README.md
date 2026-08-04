@@ -1,5 +1,9 @@
 # portfolio-lifecycle-simulator
 
+[![tests](https://github.com/jacopoventura/portfolio-lifecycle-simulator/actions/workflows/tests.yml/badge.svg)](https://github.com/jacopoventura/portfolio-lifecycle-simulator/actions/workflows/tests.yml)
+[![python](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/)
+[![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 **Goal — model the full investment lifecycle of a portfolio whose job is to
 cover living expenses in retirement *beyond* what state or occupational
 pensions provide.**
@@ -40,6 +44,91 @@ wealth such that, at the optimal allocation, the portfolio preserves a target
 fraction of real capital *both* under ordinary random markets and under a
 forced historical crash in the opening years — each at its own configurable
 confidence level.
+
+## Example output
+
+Abridged from a real run on template figures — see `config.example.toml`.
+
+### S1 · Accumulation
+
+```text
+THREE WEALTH NUMBERS BELOW — don't confuse them (all at 2041 prices; today's € in parentheses):
+    €1.95M   income min        covers the required net €4,219/mo at 2041 (€3,000 today) with 50/50 stocks/bonds
+    €1.49M   plan P50 (MC)     generates ≈€3,231/mo (≈€2,297 today) with 65/35 stocks/bonds
+    €4.19M   preservation min  keeps ≥60% real wealth to 2071 (€2.98M today)
+
+Required portfolio at horizon (15y)
+     Target income : 4,219/mo  (50,633/yr, inflation-adjusted)
+     Composition   : stocks 50.0% · bonds 50.0%
+     DE :      2,076,483  (stocks 1,038,241 · bonds 1,038,241)
+     IT :      1,946,587  (stocks 973,293 · bonds 973,293)
+
+  2. Contribution needed to reach the TARGET INCOME with ≥95% confidence
+     (fixed CAGR of 6.0%, current allocation kept)
+        DE : stocks 4,750/mo · bonds 6,024/mo · total 10,774/mo   P(income)=✓95.3%
+        IT : stocks 4,500/mo · bonds 5,522/mo · total 10,022/mo   P(income)=✓95.0%
+
+  3. Major risks  (top 2 negative impacts on income success)
+     DE : Inflation (+δ ±1pp) → -7.7pp  ·  Stock CAGR (−δ ±2pp) → -7.1pp
+     IT : Inflation (+δ ±1pp) → -9.1pp  ·  Stock CAGR (−δ ±2pp) → -7.6pp
+```
+
+### S2 · Survival under stress
+
+```text
+At the plan's current allocation, covering €4,219/mo nominal at retirement.
+  Each cell: SURVIVAL % (median capital PRESERVED %, real €) — see below the table.
+
+      Portfolio                                      Baseline      Crash yr1-5        2000-2002        2008-2009
+      ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+      €1.95M  IT required portfolio                 98% (59%)        90% (24%)        85% (22%)        96% (39%)
+      €1.76M  10% preservation                      95% (48%)        76% (13%)        71% (11%)        88% (28%)
+      €2.08M  25% preservation                      99% (65%)        95% (30%)        92% (28%)        98% (45%)
+      €3.20M  50% preservation                     100% (94%)       100% (61%)       100% (58%)       100% (76%)
+      €4.23M  60% preservation (configured target) 100% (107%)       100% (74%)       100% (71%)       100% (89%)
+
+  How to read this table
+    Each ROW is a candidate starting portfolio. Each COLUMN is a market
+    condition it's tested against: "Baseline" = ordinary random returns;
+    the other three force a real historical crash into the first years of
+    retirement. Each cell shows two numbers:
+      SURVIVAL  — P(the portfolio never fully runs out over 30 years)
+      PRESERVED — the typical (median) real capital left at the end, as a
+                  % of what you started with (in parentheses)
+```
+
+### S3 · Instruments
+
+```text
+Real-world CAGR distributions  (P5 = bad-luck entry, P50 = typical):
+
+     Source                  Period             P5     P50
+     ──────────────────────  ─────────────  ──────  ──────
+     S&P 500  USD            2000–2026       +6.3%   +6.5%
+     S&P 500  USD            2000–2015       +2.0%   +2.3%
+     S&P 500  EUR            2003–2026       +9.0%   +9.3%
+     DCA      historical     2000–2015       +4.7%   +4.9%
+     Lump-sum 2-phase MC     2000–2015       -3.4%   +2.1%
+     DCA      2-phase MC     2000–2015       +0.3%   +4.4%
+
+
+ Common window  2016-05 → 2026-07   10.2y
+    
+         k  Allocation                                  P50     P5  Sharpe  Sortino     MDD  Avg corr
+      ─────────────────────────────────────────────────────────────────────────────────────────
+        ★2  QQQ 40% + TDIV 60%                        16.3%  15.9%   1.07   1.31  -32.2%   0.32
+        ☆3  QQQ 40% + TDIV 60%                        16.3%  15.9%   1.07   1.31  -32.2%   0.32
+         7  IS3R 23% + QQQ 20% + TDIV 57%             15.0%  14.7%   1.05   1.26  -32.8%   0.47
+       all  IS3R 23% + QQQ 20% + TDIV 57%             15.0%  14.7%   1.05   1.26  -32.8%   0.47
+         6  IS3R 23% + QQQ 20% + TDIV 57%             15.0%  14.7%   1.05   1.26  -32.8%   0.47
+         5  IS3R 22% + QQQ 20% + TDIV 57%             15.0%  14.7%   1.05   1.26  -32.8%   0.47
+         4  IS3R 22% + QQQ 20% + TDIV 58%             15.0%  14.7%   1.05   1.26  -32.8%   0.47
+      ─────────────────────────────────────────────────────────────────────────────────────────
+       ref  S&P 500  etf-window  [2016–2026] (EUR)    13.1%  12.7%      —      —  -33.3%      —
+       ref  S&P 500  2000–today  [2000–2026]           6.4%  -1.5%      —      —  -56.8%      —
+```
+
+---
 
 ## Modelling
 
