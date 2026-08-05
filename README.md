@@ -250,12 +250,75 @@ value. Flag form is the key with underscores replaced by hyphens
 - **Compare like with like**: two scenarios are only comparable if they differ
   in the parameters under study and share everything else, including the seed.
 
-### Roadmap
+### MCP server
 
-Structured `--json` output, a reduced-simulation `--fast` mode, section
-selection and explicit `--record` gating of run-history side effects are in
-progress; they complete the MCP tool surface
-(`run_plan_check`, `get_last_summary`, `get_run_history`).
+`financial_planning_server.py` runs this engine as a stdio MCP server. A
+sibling repo, `AIagent` (a personal chat agent for career + financial
+planning), spawns it as one of its tools — see that repo's `TODO.md` Phase 4
+for the cross-repo architecture. It reuses the same override/isolation
+machinery described above (`apply_cli_overrides` + `FIRE_CONFIG`), so a call
+from the agent gets the same "never touches the real `config.toml`"
+guarantee a human running `main.py --target-monthly-retirement-income 3000`
+gets.
+
+One tool is exposed today: `accumulation_projection` — the S1 accumulation
+question (required portfolio, current success probability, required CAGR)
+for the IT tax scenario, with the full text report available on request via
+`include_report=True`. More tools are planned, wrapping `monte_carlo.py`'s
+pure compute functions directly (decumulation preservation, two-bucket mode,
+survival matrices) rather than going through this CLI-flag surface.
+
+---
+
+## Lessons learned — serving an engine over MCP
+
+Non-obvious things that cost real debugging time when wrapping this engine as
+an MCP server. The client-side counterparts live in
+[AIagent](https://github.com/jacopoventura/AIagent)'s README.
+
+**stdout belongs to the protocol.** A stdio MCP server speaks JSON-RPC over
+stdout. This engine prints progress markers as it runs, and every one of them
+would corrupt the stream — silently, producing confusing frame errors rather
+than an obvious crash. Every call into the pipeline from the server is wrapped
+in `contextlib.redirect_stdout`.
+
+**Import the engine; don't shell out to it.** The obvious design — subprocess
+`main.py`, parse the output — would have required structured `--json` output, a
+`--fast` flag, and gating the run-history side effects. None of that was
+necessary. `run_accum`, `run_decum` and `run_cagr` are plain importable
+functions, and every file write (`run_history.csv`, `drift_history.*`,
+`last_run_*`) lives in `main()` or `_save_context()` — not in them. So the
+server calls the functions directly, gets typed results with nothing to parse,
+and writes nothing. Checking where the side effects actually lived removed the
+entire blocker list.
+
+**A server called from another repo needs three things set explicitly.** The
+client spawns this server as a subprocess, and naive spawning fails three ways:
+the wrong interpreter (the client's venv has no numpy/pandas/scipy), the wrong
+`sys.path` (Python adds the *script's* directory — which is why this server
+sits at the repo root, so `import main` resolves), and the wrong working
+directory (`resolve_config_path()` returns a *relative* path). All three are
+configuration on the client side; `StdioServerParameters` accepts `command`,
+`cwd` and `env`.
+
+**Tool descriptions are prompt engineering, not documentation.** Asked what
+portfolio covers a given monthly income, the agent initially asked four
+clarifying questions and then fell back to the 4% rule — a figure ~30% below
+what this engine computes at the user's configured 2.8% withdrawal rate. It had
+the tool and didn't call it, because nothing told it that omitted parameters
+fall back to the saved plan. The fix was entirely in text the model reads:
+state the fallback explicitly, give every parameter a `Field(description=...)`
+with units and ranges, **interpolate the live config values into the tool
+description at server startup**, and return `assumptions_used` alongside the
+result so an answer can say which values were applied rather than applying them
+silently.
+
+**Timings, measured** (2,000 simulations, this repo's own functions):
+`simulate_decumulation` 0.04s, `compute_canonical_fi_required_scan` 5.5s,
+full `run_accum` + `run_decum` pipeline ~17s. Latency scales with simulation
+count and, for the scan, with how many candidate wealth values the bisection
+evaluates. Fast enough for synchronous tool calls; a job/polling contract was
+considered and rejected on this evidence rather than assumed.
 
 ---
 
