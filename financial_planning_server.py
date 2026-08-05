@@ -18,6 +18,7 @@ in AIagent):
 """
 import asyncio
 import contextlib
+import dataclasses
 import io
 import os
 import shutil
@@ -25,8 +26,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-from main import run_accum
-from models import Config, resolve_config_path
+from main import run_accum, run_decum
+from models import Config, DecumulationSummary, resolve_config_path
 from settings_gui import apply_cli_overrides
 
 from mcp.server import MCPServer
@@ -40,6 +41,65 @@ _ACCUM_WHITELIST = {
     "current_cash", "withdrawal_percentage_stock",
     "stock_monthly_investment_pct", "bonds_monthly_investment_pct",
 }
+
+_DECUM_WHITELIST = {
+    "target_monthly_retirement_income", "years", "bonds_percentage",
+    "withdrawal_percentage_stock", "mc_decumulation_years",
+    "fi_preservation_ratio", "fi_preservation_confidence_baseline",
+    "fi_preservation_confidence_stress",
+}
+
+
+def _resolve_assumptions(whitelist: set[str], overrides: dict[str, float], cagr: str | None) -> dict:
+    """The full set of plan-lever values actually used for this call: the
+    saved-plan value (config.toml, or whatever FIRE_CONFIG points at) for
+    anything the caller omitted, the override for anything it passed. Read
+    independently of the tool's own compute call so it's available to
+    explain *why* a run failed (e.g. a contradictory saved-plan value), not
+    just to annotate a successful one."""
+    with open(resolve_config_path(), "rb") as f:
+        base_config = tomllib.load(f)
+    assumptions_used = {k: base_config[k] for k in whitelist}
+    assumptions_used.update(overrides)
+    resolved_cagr = Config.parse_planning_cagr(cagr)
+    assumptions_used["stock_cagr_percent"] = (
+        resolved_cagr * 100 if resolved_cagr is not None
+        else base_config["expected_yearly_growth_stocks_percent"]
+    )
+    assumptions_used["overrides_applied"] = overrides  # what the caller actually changed
+    return assumptions_used
+
+
+@contextlib.contextmanager
+def _isolated_config_override(overrides: dict[str, float]):
+    """While inside the `with` block, FIRE_CONFIG points at a temp copy of
+    config.toml with `overrides` merged in (same validation the GUI dialog
+    uses); restores the previous FIRE_CONFIG state on exit either way. No-op
+    (real config.toml untouched, FIRE_CONFIG untouched) if overrides is empty.
+
+    os.environ is process-global, so this assumes calls into tools that use
+    it don't overlap - true today (stdio is one request at a time from a
+    single client) but not guaranteed if the transport ever changes. Add a
+    lock around this if that stops being true.
+    """
+    if not overrides:
+        yield
+        return
+    prev_fire_config = os.environ.get("FIRE_CONFIG")
+    with tempfile.TemporaryDirectory(prefix="fire_mcp_") as tmp_dir:
+        tmp_config = Path(tmp_dir) / "config.toml"
+        shutil.copy(Path(resolve_config_path()), tmp_config)
+        error = apply_cli_overrides(tmp_config, overrides)
+        if error:
+            raise ValueError(error)
+        os.environ["FIRE_CONFIG"] = str(tmp_config)
+        try:
+            yield
+        finally:
+            if prev_fire_config is None:
+                os.environ.pop("FIRE_CONFIG", None)
+            else:
+                os.environ["FIRE_CONFIG"] = prev_fire_config
 
 _BASE_DESCRIPTION = """Answers the core planning question: what portfolio is required at the
 horizon to cover a target monthly income, and is the current plan on
@@ -106,39 +166,9 @@ def accumulation_projection(
     # first, or switch to an explicit dict.
     overrides = {k: v for k, v in locals().items()
                  if k in _ACCUM_WHITELIST and v is not None}
+    assumptions_used = _resolve_assumptions(_ACCUM_WHITELIST, overrides, cagr)
 
-    # Resolved values actually used for this call - the saved-plan value for
-    # anything the caller omitted, the override for anything it passed. Read
-    # independently of run_accum() below so it's still available to explain
-    # *why* a run failed (e.g. a contradictory saved-plan value), not just
-    # to report a successful one.
-    with open(resolve_config_path(), "rb") as f:
-        base_config = tomllib.load(f)
-    assumptions_used = {k: base_config[k] for k in _ACCUM_WHITELIST}
-    assumptions_used.update(overrides)
-    resolved_cagr = Config.parse_planning_cagr(cagr)
-    assumptions_used["stock_cagr_percent"] = (
-        resolved_cagr * 100 if resolved_cagr is not None
-        else base_config["expected_yearly_growth_stocks_percent"]
-    )
-    assumptions_used["overrides_applied"] = overrides  # what the caller actually changed
-
-    prev_fire_config = os.environ.get("FIRE_CONFIG")
-    tmp_dir_ctx = tempfile.TemporaryDirectory(prefix="fire_mcp_") if overrides else None
-    try:
-        if overrides:
-            tmp_config = Path(tmp_dir_ctx.name) / "config.toml"
-            shutil.copy(Path(resolve_config_path()), tmp_config)
-            error = apply_cli_overrides(tmp_config, overrides)
-            if error:
-                raise ValueError(error)
-            # os.environ is process-global, so this assumes calls into this
-            # tool don't overlap - true today (stdio is one request at a time
-            # from a single client) but not guaranteed if a second tool that
-            # touches FIRE_CONFIG is added, or the transport changes. Add a
-            # lock around the override→call→restore sequence before that.
-            os.environ["FIRE_CONFIG"] = str(tmp_config)
-
+    with _isolated_config_override(overrides):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             # verbose=False here is not this tool's include_report - it picks
@@ -149,13 +179,6 @@ def accumulation_projection(
             text, p50, tail, required_cagr, tail_pct, accum_required_it, _verdict_inputs = (
                 run_accum(verbose=False, planning_cagr=cagr)
             )
-    finally:
-        if overrides:
-            if prev_fire_config is None:
-                os.environ.pop("FIRE_CONFIG", None)
-            else:
-                os.environ["FIRE_CONFIG"] = prev_fire_config
-            tmp_dir_ctx.cleanup()
 
     result = {
         "assumptions_used": assumptions_used,
@@ -165,6 +188,92 @@ def accumulation_projection(
         "required_stock_cagr": required_cagr,
         "required_portfolio_income_bar_eur": accum_required_it,
     }
+    if include_report:
+        result["report"] = text
+    return result
+
+
+_DECUM_BASE_DESCRIPTION = """Does the portfolio survive and preserve its real value through the
+withdrawal phase? Answers the three focused decumulation questions,
+anchored on the IT required portfolio from the income-formula bar:
+
+ 1. At the IT required portfolio, what's the probability the real final
+    wealth still meets the preservation bar (preserve_ratio · W)?
+ 2. What monthly contribution would grow the deterministic projection up
+    to the preservation-required wealth?
+ 3. What is the preservation-required wealth at the best allocation?
+
+Also returns the years-to-retirement tradeoff (max safe withdrawal at
+each candidate retirement year) and a preservation-ratio sensitivity scan.
+
+EVERY PARAMETER IS OPTIONAL. Omitted parameters use the user's saved
+plan. Do not ask the user for these; pass only the values they explicitly
+changed in this conversation."""
+
+
+def _decum_assumption_summary() -> str:
+    """Live plan values, injected into the tool description at server start.
+    Same one-time-snapshot reasoning as _assumption_summary() above."""
+    try:
+        with open(resolve_config_path(), "rb") as f:
+            cfg = Config.from_dict(tomllib.load(f))
+        return (
+            "\n\nCURRENT SAVED PLAN (used for any omitted parameter): "
+            f"decumulation horizon {cfg.mc_decumulation_years}y, "
+            f"preservation ratio {cfg.fi_preservation_ratio:.0%}, "
+            f"confidence baseline {cfg.fi_preservation_confidence_baseline:.0%} "
+            f"/ worst-SORR {cfg.fi_preservation_confidence_stress:.0%}, "
+            f"{cfg.bonds_percentage:.0f}% bonds."
+        )
+    except Exception:                      # importable without config.toml
+        return "\n\nOmitted parameters use the user's saved plan."
+
+
+@server.tool(description=_DECUM_BASE_DESCRIPTION + _decum_assumption_summary(),
+             annotations=ToolAnnotations(readOnlyHint=True))
+def decumulation_projection(
+    target_monthly_retirement_income: float | None = None,
+    years: float | None = None,
+    bonds_percentage: float | None = None,
+    withdrawal_percentage_stock: float | None = None,
+    mc_decumulation_years: float | None = None,
+    fi_preservation_ratio: float | None = None,
+    fi_preservation_confidence_baseline: float | None = None,
+    fi_preservation_confidence_stress: float | None = None,
+    cagr: str | None = None,
+    include_report: bool = False,
+) -> dict:
+    """Protocol-visible description comes from _DECUM_BASE_DESCRIPTION + the
+    live plan snapshot (see the @server.tool decorator above), not this
+    docstring - kept short here to avoid two copies of the same text
+    drifting apart."""
+    # locals() here only contains this function's parameters because this is
+    # the first statement in the body - see the identical note on
+    # accumulation_projection above.
+    overrides = {k: v for k, v in locals().items()
+                 if k in _DECUM_WHITELIST and v is not None}
+    assumptions_used = _resolve_assumptions(_DECUM_WHITELIST, overrides, cagr)
+
+    with _isolated_config_override(overrides):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            # verbose=False -> the focused Takeaway + survival matrix (§4.14).
+            # verbose=True would additionally print the Q1/Q2/Q3 tables and
+            # §4.10-§4.13/§4.15 supporting context - pinned False for the same
+            # "return structured numbers, not a caller-controlled report
+            # size" reasoning as accumulation_projection.
+            # p50=0.0 -> portfolio_override=None inside run_decum(): the
+            # focused pipeline self-anchors on the IT required portfolio, it
+            # doesn't need an external starting-wealth figure when not verbose
+            # (portfolio_override is only read inside main_decumulation's
+            # verbose-only §4.10/§4.11 supporting-context block).
+            text, summary = run_decum(p50=0.0, planning_cagr=cagr, verbose=False)
+
+    result = {"assumptions_used": assumptions_used}
+    if summary is not None:
+        result.update(dataclasses.asdict(summary))
+    else:
+        result.update({f.name: None for f in dataclasses.fields(DecumulationSummary)})
     if include_report:
         result["report"] = text
     return result

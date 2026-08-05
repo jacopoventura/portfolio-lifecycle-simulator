@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import financial_planning_server as server_module
-from financial_planning_server import accumulation_projection
+from financial_planning_server import accumulation_projection, decumulation_projection
 
 _EXAMPLE_CONFIG = Path(__file__).resolve().parent.parent / "config.example.toml"
 
@@ -24,9 +24,9 @@ def isolated_config(monkeypatch):
 
 
 class TestServerRegistersTools:
-    def test_lists_accumulation_projection(self):
+    def test_lists_both_tools(self):
         tools = asyncio.run(server_module.server.list_tools())
-        assert {t.name for t in tools} == {"accumulation_projection"}
+        assert {t.name for t in tools} == {"accumulation_projection", "decumulation_projection"}
 
     def test_lists_projection_prompt(self):
         prompts = asyncio.run(server_module.server.list_prompts())
@@ -88,3 +88,45 @@ class TestAccumulationProjection:
         )
         after = real_config.read_bytes() if real_config.exists() else None
         assert before == after
+
+
+class TestDecumulationProjection:
+    def test_returns_structured_numbers_with_defaults(self):
+        # Unlike accumulation, decum doesn't depend on config.example.toml's
+        # zeroed "<-- EDIT ME" fields (current_stock_value etc.), so no
+        # overrides are needed for a working call.
+        result = decumulation_projection()
+        assert result["required_portfolio_fi_canonical"] > 0
+        assert result["target_monthly_withdrawal"] > 0
+        assert result["n_years"] > 0
+        assert result["preservation_sensitivity_ratios"]
+        assert result["preservation_sensitivity_wealth_eur"]
+
+    def test_report_omitted_by_default(self):
+        result = decumulation_projection()
+        assert "report" not in result
+
+    def test_report_included_when_requested(self):
+        result = decumulation_projection(include_report=True)
+        assert "report" in result
+
+    def test_invalid_override_raises(self):
+        with pytest.raises(ValueError, match="Preservation ratio"):
+            decumulation_projection(fi_preservation_ratio=1.5)
+
+    def test_does_not_leak_fire_config_env_var(self):
+        prev = os.environ.get("FIRE_CONFIG")
+        decumulation_projection(mc_decumulation_years=25)
+        assert os.environ.get("FIRE_CONFIG") == prev
+
+    def test_does_not_write_real_config(self):
+        real_config = Path(__file__).resolve().parent.parent / "config.toml"
+        before = real_config.read_bytes() if real_config.exists() else None
+        decumulation_projection(mc_decumulation_years=25)
+        after = real_config.read_bytes() if real_config.exists() else None
+        assert before == after
+
+    def test_assumptions_used_reflects_overrides(self):
+        result = decumulation_projection(mc_decumulation_years=25)
+        assert result["assumptions_used"]["mc_decumulation_years"] == 25
+        assert result["assumptions_used"]["overrides_applied"] == {"mc_decumulation_years": 25}
