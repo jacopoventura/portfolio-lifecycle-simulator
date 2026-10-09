@@ -73,6 +73,10 @@ _COMBINED_GRID_BOND_STEP = 500.0
 
 _VALID_RETURN_METHODS = {"parametric", "bootstrap"}
 
+# Lower bound on simulated nominal bond yields. EUR 10y Bunds bottomed near
+# −0.9% (2019–2020); −1% keeps negative-rate regimes possible but bounded.
+_BOND_YIELD_FLOOR = -0.01
+
 
 def _get_bootstrap_returns(config: Config) -> np.ndarray | None:
     """Return the cached 1-D historical annual returns array when bootstrap
@@ -107,7 +111,23 @@ def _generate_mc_returns(
     bootstrap_annual_returns: np.ndarray | None = None,
     bootstrap_block_size: int = 5,
     bootstrap_mean_shift: bool = True,
+    bond_yield_mean_reversion: float = 1.0,
+    bond_yield_inflation_beta: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Draw (stock_returns, inflations, bond_yields), each (n_simulations, years).
+
+    Bond yields follow a persistent, inflation-linked process:
+
+        y_t = ȳ + β·(π_t − π̄) + u_t,     u_t = (1 − κ)·u_{t−1} + σ_y·ε_t,  u_{−1} = 0
+
+    with ȳ = `bonds_yield`, σ_y = `bond_std`, κ = `bond_yield_mean_reversion`,
+    β = `bond_yield_inflation_beta`. ε_t is correlated with the stock shock so
+    that `stock_bond_corr` is the correlation between stock returns and bond
+    PRICE returns (bond price moves opposite to yield). κ = 1, β = 0 reproduces
+    the legacy model: independent yield levels drawn fresh every year. Those
+    are the function defaults (back-compat for direct callers); config-driven
+    callers pass the Config values.
+    """
     shape = (n_simulations, years)
 
     # ── Stock returns: bootstrap or parametric ───────────────────────────────
@@ -135,7 +155,12 @@ def _generate_mc_returns(
         # stocks are already empirically correlated with bonds via history)
         z_bond_raw = rng.standard_normal(shape)
         if abs(stock_bond_corr) > 1e-9:
-            z_bond = stock_bond_corr * z_stock + np.sqrt(1.0 - stock_bond_corr ** 2) * z_bond_raw
+            # Minus sign: a positive yield shock is a NEGATIVE bond price shock,
+            # so corr(stock, yield shock) = −stock_bond_corr gives
+            # corr(stock return, bond price return) = +stock_bond_corr.
+            # (Before 2026-10 the sign was +, which made a configured −0.2
+            # "hedge" behave as a +0.2 co-movement of stock and bond returns.)
+            z_bond = -stock_bond_corr * z_stock + np.sqrt(1.0 - stock_bond_corr ** 2) * z_bond_raw
         else:
             z_bond = z_bond_raw
 
@@ -174,9 +199,29 @@ def _generate_mc_returns(
     inflations = np.where(inflations < 0, inflations / 2, inflations)
 
     # ── Bond yields — always parametric ──────────────────────────────────────
+    # Persistent rate shock u_t (AR(1), pull-back speed κ toward 0) plus a
+    # level link to this year's inflation deviation. Persistence lets rate
+    # regimes last years (a 2022-style rise is NOT undone the next year), and
+    # the inflation link makes yields rise in the inflation scenarios that
+    # hurt nominal bonds — the 1970s mechanism.
     if bootstrap_annual_returns is not None:
-        z_bond = rng.standard_normal(shape)
-    bond_yields = np.maximum(bonds_yield + z_bond * bond_std, -0.5)
+        z_bond = rng.standard_normal(shape)  # bootstrap: no stock/bond link
+    kappa = float(bond_yield_mean_reversion)
+    if kappa >= 1.0 - 1e-12:
+        rate_shock = z_bond * bond_std          # legacy: independent each year
+    else:
+        persistence = 1.0 - kappa
+        rate_shock = np.empty(shape)
+        u = np.zeros(n_simulations)
+        for t in range(years):
+            u = persistence * u + bond_std * z_bond[:, t]
+            rate_shock[:, t] = u
+    bond_yields = (
+        bonds_yield
+        + bond_yield_inflation_beta * (inflations - inflation_mean)
+        + rate_shock
+    )
+    bond_yields = np.maximum(bond_yields, _BOND_YIELD_FLOOR)
     return stock_returns, inflations, bond_yields
 
 
@@ -231,6 +276,8 @@ def _setup_mc(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -1609,6 +1656,8 @@ def simulate_decumulation(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -1708,6 +1757,8 @@ def compute_sorr_scenarios(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -1811,6 +1862,8 @@ def compute_allocation_sweep(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -1924,6 +1977,8 @@ def compute_chained_mc(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -1973,6 +2028,8 @@ def compute_chained_mc(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -2085,6 +2142,8 @@ def compute_swr_sweep(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -2173,6 +2232,8 @@ def compute_wealth_preservation_under_sorr(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -2335,6 +2396,8 @@ def compute_canonical_fi_required_scan(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -2721,6 +2784,8 @@ def compute_two_bucket_required_wealth(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -2814,6 +2879,8 @@ def compute_survival_matrix(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -2932,6 +2999,8 @@ def compute_crash_timing_matrix(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -3161,6 +3230,8 @@ def compute_focused_preservation_table(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -3393,6 +3464,8 @@ def _accumulation_per_year_wealth(
         inflation_ar1_phi=config.mc_inflation_ar1_phi,
         stock_return_df=config.mc_stock_return_df,
         stock_bond_corr=config.mc_stock_bond_correlation,
+        bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
+        bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -3528,6 +3601,8 @@ def compute_years_to_retirement_tradeoff(
             inflation_ar1_phi=cfg_year.mc_inflation_ar1_phi,
             stock_return_df=cfg_year.mc_stock_return_df,
             stock_bond_corr=cfg_year.mc_stock_bond_correlation,
+            bond_yield_mean_reversion=cfg_year.mc_bond_yield_mean_reversion,
+            bond_yield_inflation_beta=cfg_year.mc_bond_yield_inflation_beta,
             stock_return_ar1_phi=cfg_year.mc_stock_return_ar1_phi,
             stock_mean_uncertainty=cfg_year.mc_stock_mean_uncertainty,
             stock_vol_uncertainty=cfg_year.mc_stock_vol_uncertainty,
@@ -3624,6 +3699,8 @@ def compute_years_to_retirement_tradeoff(
             inflation_ar1_phi=cfg_year.mc_inflation_ar1_phi,
             stock_return_df=cfg_year.mc_stock_return_df,
             stock_bond_corr=cfg_year.mc_stock_bond_correlation,
+            bond_yield_mean_reversion=cfg_year.mc_bond_yield_mean_reversion,
+            bond_yield_inflation_beta=cfg_year.mc_bond_yield_inflation_beta,
             stock_return_ar1_phi=cfg_year.mc_stock_return_ar1_phi,
             stock_mean_uncertainty=cfg_year.mc_stock_mean_uncertainty,
             stock_vol_uncertainty=cfg_year.mc_stock_vol_uncertainty,

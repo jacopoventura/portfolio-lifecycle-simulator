@@ -81,32 +81,37 @@ SORR_NUM_STRESS_SCENARIOS    = 3
 
 # compute_chained_mc
 CHAINED_JOINT_SURVIVAL_RATE  = 0.286000
-CHAINED_ACCUM_SUCCESS_FRAC   = 0.012000
+CHAINED_ACCUM_SUCCESS_FRAC   = 0.014000
 
 # compute_canonical_fi_required_scan
-# Snapshot reflects the bond model with duration risk (Fix B), yield std 1.0,
-# and fi_preservation_ratio default 0.75. Regenerated via tests/_fixture_probe.py.
-CANONICAL_REQUIRED_WEALTH    = 6_103_808.59
+# Snapshot reflects the bond model with duration risk (Fix B), the persistent,
+# inflation-linked yield process (2026-10: κ=0.15, β=0.3 via Config defaults;
+# was 6,103,808.59 under i.i.d. yields) and fi_preservation_ratio default 0.75.
+# Regenerated via tests/_fixture_probe.py.
+CANONICAL_REQUIRED_WEALTH    = 7_149_853.52
 CANONICAL_OPTIMAL_BONDS_PCT  = 0.80
 CANONICAL_REACHABLE          = True
 CANONICAL_WORST_STRESS_LABEL = "Historical 2000-2002"
 
 # compute_wealth_preservation_under_sorr
 WEALTH_SURFACE_NUM_ROWS      = 4
-WEALTH_SURFACE_BASELINE_P50  = 0.954000
-WEALTH_SURFACE_BASELINE_P100 = 0.366000
-WEALTH_SURFACE_BRIDGE_P50    = 1_266_763.80
+WEALTH_SURFACE_BASELINE_P50  = 0.938000
+WEALTH_SURFACE_BASELINE_P100 = 0.362000
+WEALTH_SURFACE_BRIDGE_P50    = 1_259_585.61
 
 # compute_two_bucket_required_wealth (E3)
 # B* saturates at the default hi=15M ceiling at this fixture's confidence bar —
 # a 100%-equity, zero-withdrawal bucket cannot clear it at any size (fat-tailed
 # 30y return uncertainty caps achievable confidence below the bar). Genuine
 # model property, not a bug — reproduced independently on the user's real
-# config too. Regenerated via tests/_fixture_probe.py.
-TWO_BUCKET_REQUIRED_RETIREMENT = 1_100_366.21
+# config too. Since the 2026-10 bond model the single pot also saturates at
+# the 15M ceiling (was 10,827,563.48): yields now rise with inflation, so the
+# bond-heavy optimum loses real value in the inflationary paths.
+# Regenerated via tests/_fixture_probe.py.
+TWO_BUCKET_REQUIRED_RETIREMENT = 1_107_641.60
 TWO_BUCKET_REQUIRED_BEQUEST    = 15_000_000.00
-TWO_BUCKET_REQUIRED_TOTAL      = 16_100_366.21
-TWO_BUCKET_SINGLE_POT          = 10_827_563.48
+TWO_BUCKET_REQUIRED_TOTAL      = 16_107_641.60
+TWO_BUCKET_SINGLE_POT          = 15_000_000.00
 TWO_BUCKET_REACHABLE           = False
 TWO_BUCKET_WORST_STRESS_LABEL  = "Historical 2000-2002"
 
@@ -114,7 +119,7 @@ TWO_BUCKET_WORST_STRESS_LABEL  = "Historical 2000-2002"
 # Regenerated via tests/_fixture_probe.py.
 SURVIVAL_MATRIX_NUM_SCENARIOS = 4
 SURVIVAL_MATRIX_BASELINE_SURV = 1.000000
-SURVIVAL_MATRIX_BASELINE_MED  = 0.447997
+SURVIVAL_MATRIX_BASELINE_MED  = 0.427853
 SURVIVAL_MATRIX_WORST_SURV    = 1.000000
 
 # compute_crash_timing_matrix — offsets [0,5,10,15] (fits the fixture's 20y horizon).

@@ -53,6 +53,10 @@ def validate_config_inputs(
         raise ValueError("mc_inflation_ar1_phi must be strictly between -1 and 1 (stationarity requires |φ| < 1).")
     if not (-1.0 < config.mc_stock_bond_correlation < 1.0):
         raise ValueError("mc_stock_bond_correlation must be strictly between -1 and 1.")
+    if not (0.0 < config.mc_bond_yield_mean_reversion <= 1.0):
+        raise ValueError("mc_bond_yield_mean_reversion must be in (0, 1] (1 = independent yearly yields).")
+    if not (0.0 <= config.mc_bond_yield_inflation_beta <= 2.0):
+        raise ValueError("mc_bond_yield_inflation_beta must be between 0 and 2.")
     if config.mc_stock_return_df <= 2.0:
         raise ValueError("mc_stock_return_df must be > 2 (t-distribution variance is infinite for df ≤ 2).")
     if not (-1.0 < config.mc_stock_return_ar1_phi < 1.0):

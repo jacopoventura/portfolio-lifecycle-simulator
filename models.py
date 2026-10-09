@@ -74,7 +74,9 @@ class Config:
     mc_grid_n_simulations: int = 15_000
     mc_grid_contribution_max: float = 7_000.0
     mc_stock_return_df: float = 1000.0         # Student-t df for stocks (large = normal, 5 = fat tails)
-    mc_stock_bond_correlation: float = 0.0    # Cholesky correlation between stock and bond draws
+    mc_stock_bond_correlation: float = 0.0    # corr(stock return, bond PRICE return); negative = bonds hedge
+    mc_bond_yield_mean_reversion: float = 0.15  # κ: yearly pull-back of the rate shock (1 = legacy i.i.d. yields)
+    mc_bond_yield_inflation_beta: float = 0.3   # β: yield move per 1pp inflation deviation (0 = no link)
     mc_stock_return_ar1_phi: float = 0.0      # AR(1) mean reversion (negative = post-crash recovery)
     mc_stock_mean_uncertainty: float = 0.0    # prior std on stock CAGR (epistemic uncertainty)
     mc_stock_vol_uncertainty: float = 0.0     # prior std on stock volatility (epistemic uncertainty)
@@ -146,7 +148,7 @@ class Config:
             mc_n_simulations=_mc_scale(int(config.get("mc_n_simulations", 10000))),
             mc_stock_return_std_percent=float(config.get("mc_stock_return_std_percent", 15.0)),
             mc_inflation_std_percent=float(config.get("mc_inflation_std_percent", 3.0)),
-            mc_bond_yield_std_percent=float(config.get("mc_bond_yield_std_percent", 1.0)),
+            mc_bond_yield_std_percent=float(config.get("mc_bond_yield_std_percent", 0.7)),
             mc_target_success_percent=int(config.get("mc_target_success_percent", 95)),
             mc_grid_cagr_min=float(config.get("mc_grid_cagr_min", 0.03)),
             mc_grid_cagr_max=float(config.get("mc_grid_cagr_max", 0.09)),
@@ -174,6 +176,8 @@ class Config:
             mc_grid_contribution_max=float(config.get("mc_grid_contribution_max", 7_000.0)),
             mc_stock_return_df=float(config.get("mc_stock_return_df", 1000.0)),
             mc_stock_bond_correlation=float(config.get("mc_stock_bond_correlation", 0.0)),
+            mc_bond_yield_mean_reversion=float(config.get("mc_bond_yield_mean_reversion", 0.15)),
+            mc_bond_yield_inflation_beta=float(config.get("mc_bond_yield_inflation_beta", 0.3)),
             mc_stock_return_ar1_phi=float(config.get("mc_stock_return_ar1_phi", 0.0)),
             mc_stock_mean_uncertainty=float(config.get("mc_stock_mean_uncertainty", 0.0)),
             mc_stock_vol_uncertainty=float(config.get("mc_stock_vol_uncertainty", 0.0)),

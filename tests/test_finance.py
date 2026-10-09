@@ -274,6 +274,21 @@ class TestValidateConfigInputsMCAdvanced:
     def test_correlation_valid_does_not_raise(self):
         self._call(_make_config(mc_stock_bond_correlation=-0.2))
 
+    def test_bond_mean_reversion_zero_raises(self):
+        with pytest.raises(ValueError, match="mc_bond_yield_mean_reversion"):
+            self._call(_make_config(mc_bond_yield_mean_reversion=0.0))
+
+    def test_bond_mean_reversion_above_one_raises(self):
+        with pytest.raises(ValueError, match="mc_bond_yield_mean_reversion"):
+            self._call(_make_config(mc_bond_yield_mean_reversion=1.5))
+
+    def test_bond_inflation_beta_negative_raises(self):
+        with pytest.raises(ValueError, match="mc_bond_yield_inflation_beta"):
+            self._call(_make_config(mc_bond_yield_inflation_beta=-0.1))
+
+    def test_bond_model_valid_does_not_raise(self):
+        self._call(_make_config(mc_bond_yield_mean_reversion=0.15, mc_bond_yield_inflation_beta=0.3))
+
     def test_stock_return_df_le_2_raises(self):
         with pytest.raises(ValueError, match="mc_stock_return_df"):
             self._call(_make_config(mc_stock_return_df=2.0))

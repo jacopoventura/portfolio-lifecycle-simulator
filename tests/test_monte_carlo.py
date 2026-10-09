@@ -232,7 +232,9 @@ class TestStockBondCorrelation:
         n_simulations=50_000, years=1,
         stock_mean=0.05, stock_std=0.15,
         inflation_mean=0.02, inflation_std=0.02,
-        bonds_yield=0.03, bond_std=0.10,
+        # 1% yield std keeps draws clear of the −1% yield floor, which would
+        # otherwise clip the distribution and bias the measured correlation.
+        bonds_yield=0.03, bond_std=0.01,
     )
 
     def _rng(self, seed: int = 42) -> np.random.Generator:
@@ -256,23 +258,27 @@ class TestStockBondCorrelation:
         r2 = run_monte_carlo_simulation(**kwargs)
         assert r1.success_rate == r2.success_rate
 
+    # stock_bond_corr is defined on bond PRICE returns, which move opposite to
+    # yields — so with the legacy single-year draw (κ=1, β=0) the yield level
+    # correlates with stocks at −ρ and the bond price shock (−yield) at +ρ.
+
     def test_negative_correlation_preserved(self):
-        """Empirical correlation should be close to the requested value."""
+        """Empirical stock/bond-price correlation should match the requested value."""
         rng = self._rng(0)
         stocks, _, bonds = _generate_mc_returns(**self._COMMON, rng=rng, stock_bond_corr=-0.5)
-        emp_corr = float(np.corrcoef(stocks[:, 0], bonds[:, 0])[0, 1])
+        emp_corr = float(np.corrcoef(stocks[:, 0], -bonds[:, 0])[0, 1])
         assert abs(emp_corr - (-0.5)) < 0.02
 
     def test_positive_correlation_preserved(self):
         rng = self._rng(0)
         stocks, _, bonds = _generate_mc_returns(**self._COMMON, rng=rng, stock_bond_corr=0.4)
-        emp_corr = float(np.corrcoef(stocks[:, 0], bonds[:, 0])[0, 1])
+        emp_corr = float(np.corrcoef(stocks[:, 0], -bonds[:, 0])[0, 1])
         assert abs(emp_corr - 0.4) < 0.02
 
     def test_zero_correlation_near_zero(self):
         rng = self._rng(0)
         stocks, _, bonds = _generate_mc_returns(**self._COMMON, rng=rng, stock_bond_corr=0.0)
-        emp_corr = float(np.corrcoef(stocks[:, 0], bonds[:, 0])[0, 1])
+        emp_corr = float(np.corrcoef(stocks[:, 0], -bonds[:, 0])[0, 1])
         assert abs(emp_corr) < 0.03
 
 
@@ -539,3 +545,69 @@ class TestInflationCagrGrid:
         for i, row in enumerate(g1.grid):
             for j, cell in enumerate(row):
                 assert cell.success_income == g2.grid[i][j].success_income
+
+
+class TestBondYieldModel:
+    """Persistent, inflation-linked bond yields (κ = mean reversion, β = inflation link)."""
+
+    _COMMON = dict(
+        n_simulations=20_000, years=30,
+        stock_mean=0.06, stock_std=0.15,
+        inflation_mean=0.023, inflation_std=0.02,
+        bonds_yield=0.03, bond_std=0.007,
+        inflation_ar1_phi=0.6,
+    )
+    _DURATION = 7.0
+
+    def _draw(self, seed: int = 0, **kw):
+        return _generate_mc_returns(**{**self._COMMON, **kw}, rng=np.random.default_rng(seed))
+
+    @staticmethod
+    def _lag1(x: np.ndarray) -> float:
+        return float(np.corrcoef(x[:, 1:].ravel(), x[:, :-1].ravel())[0, 1])
+
+    def test_legacy_defaults_are_independent_each_year(self):
+        _, _, y = self._draw()  # function defaults: κ=1, β=0
+        assert abs(self._lag1(y)) < 0.02
+
+    def test_mean_reversion_creates_persistent_regimes(self):
+        _, _, y = self._draw(bond_yield_mean_reversion=0.15)
+        assert self._lag1(y) > 0.7
+
+    def test_yields_rise_with_inflation(self):
+        _, infl, y = self._draw(bond_yield_mean_reversion=0.15, bond_yield_inflation_beta=0.3)
+        assert float(np.corrcoef(infl.ravel(), y.ravel())[0, 1]) > 0.2
+        _, infl0, y0 = self._draw(bond_yield_mean_reversion=0.15, bond_yield_inflation_beta=0.0)
+        assert abs(float(np.corrcoef(infl0.ravel(), y0.ravel())[0, 1])) < 0.03
+
+    def test_long_run_mean_is_configured_yield(self):
+        _, _, y = self._draw(bond_yield_mean_reversion=0.15, bond_yield_inflation_beta=0.3)
+        assert abs(float(np.mean(y)) - 0.03) < 0.002
+
+    def test_bond_return_volatility_is_realistic(self):
+        """Coupon + duration price change: ~4–7.5% annual vol (EUR aggregate ≈ 5–6%)."""
+        _, _, y = self._draw(bond_yield_mean_reversion=0.15, bond_yield_inflation_beta=0.3)
+        ret = y[:, 1:] - self._DURATION * np.diff(y, axis=1)
+        assert 0.04 < float(np.std(ret)) < 0.075
+
+    def test_bonds_hedge_stocks_with_negative_correlation(self):
+        stocks, _, y = self._draw(
+            bond_yield_mean_reversion=0.15, bond_yield_inflation_beta=0.3, stock_bond_corr=-0.3,
+        )
+        price_ret = -np.diff(y, axis=1)
+        assert float(np.corrcoef(stocks[:, 1:].ravel(), price_ret.ravel())[0, 1]) < -0.1
+
+    def test_yield_floor(self):
+        _, _, y = self._draw(bond_std=0.05, bond_yield_mean_reversion=0.05)
+        assert float(y.min()) >= -0.01 - 1e-12
+
+    def test_config_values_reach_the_generator(self):
+        """Config-driven decumulation must differ between legacy and persistent bonds."""
+        from monte_carlo import simulate_decumulation
+        legacy = _make_config(mc_bond_yield_mean_reversion=1.0, mc_bond_yield_inflation_beta=0.0)
+        modern = _make_config(mc_bond_yield_mean_reversion=0.15, mc_bond_yield_inflation_beta=0.3)
+        kw = dict(initial_portfolio=1_000_000.0, n_simulations=2_000, seed=1,
+                  return_final_portfolios=True)
+        a = simulate_decumulation(legacy, **kw).final_portfolios
+        b = simulate_decumulation(modern, **kw).final_portfolios
+        assert a != b
