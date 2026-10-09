@@ -611,3 +611,65 @@ class TestBondYieldModel:
         a = simulate_decumulation(legacy, **kw).final_portfolios
         b = simulate_decumulation(modern, **kw).final_portfolios
         assert a != b
+
+
+class TestCagrInput:
+    """expected_yearly_growth_stocks_percent is a CAGR: paths must compound at it."""
+
+    def test_conversion_matches_lognormal_rule_of_thumb(self):
+        from monte_carlo import cagr_to_arithmetic_mean
+        mu = cagr_to_arithmetic_mean(0.06, 0.15)
+        assert 0.069 < mu < 0.072          # ≈ g + σ²/2
+        assert cagr_to_arithmetic_mean(0.06, 0.0) == pytest.approx(0.06)
+
+    @pytest.mark.parametrize("kw", [
+        dict(),
+        dict(stock_return_df=5.0, stock_return_ar1_phi=-0.25,
+             stock_mean_uncertainty=0.015, stock_vol_uncertainty=0.03),
+    ])
+    def test_median_compounded_growth_equals_input(self, kw):
+        stocks, _, _ = _generate_mc_returns(
+            rng=np.random.default_rng(3), n_simulations=20_000, years=30,
+            stock_mean=0.06, stock_std=0.15, inflation_mean=0.02, inflation_std=0.02,
+            bonds_yield=0.03, bond_std=0.007, stock_mean_is_cagr=True, **kw,
+        )
+        cagr = np.prod(1 + stocks, axis=1) ** (1 / 30) - 1
+        assert float(np.median(cagr)) == pytest.approx(0.06, abs=0.003)
+
+    def test_legacy_flag_keeps_arithmetic_mean(self):
+        stocks, _, _ = _generate_mc_returns(
+            rng=np.random.default_rng(3), n_simulations=20_000, years=30,
+            stock_mean=0.06, stock_std=0.15, inflation_mean=0.02, inflation_std=0.02,
+            bonds_yield=0.03, bond_std=0.007, stock_mean_is_cagr=False,
+        )
+        assert float(np.mean(stocks)) == pytest.approx(0.06, abs=0.002)
+
+
+class TestDecumRebalancing:
+    """Annual rebalancing must not depend on whether a glide path is active."""
+
+    def _survival(self, stock_frac: float, glide_end: float, **kw) -> float:
+        from monte_carlo import _run_decum_loop
+        n, ny = 5_000, 30
+        s, i, b = _generate_mc_returns(
+            rng=np.random.default_rng(42), n_simulations=n, years=ny,
+            stock_mean=0.06, stock_std=0.15, inflation_mean=0.023, inflation_std=0.01,
+            bonds_yield=0.03, bond_std=0.007, inflation_ar1_phi=0.6,
+            bond_yield_mean_reversion=0.15, bond_yield_inflation_beta=0.3,
+        )
+        W = 1_000_000.0
+        return _run_decum_loop(
+            s, i, b, np.full(n, W * stock_frac), np.full(n, W * (1 - stock_frac)),
+            W * 0.035 / 12, ny, "fixed", 0.0, 0.0, 999,
+            stock_pct_end=glide_end, glide_years=20, **kw,
+        ).survival_rate
+
+    def test_no_jump_where_start_equals_glide_end(self):
+        # Before 2026-10 the 30%-stock point (= glide end) lost rebalancing and
+        # survival dropped ~18pp versus its neighbours.
+        neighbours = [self._survival(0.29, 0.30), self._survival(0.31, 0.30)]
+        at_end = self._survival(0.30, 0.30)
+        assert min(neighbours) - 0.03 < at_end < max(neighbours) + 0.03
+
+    def test_legacy_stocks_first_still_available(self):
+        assert self._survival(0.30, 0.30, rebalance=False) != self._survival(0.30, 0.30)

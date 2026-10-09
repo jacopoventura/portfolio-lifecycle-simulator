@@ -95,7 +95,7 @@ The **report is preservation-led**; survival rates are footnoted, not headlined.
 | 4.3 | Portfolio Fan | P3/P25/P50/P75/P97 wealth percentiles by year (fixed strategy) |
 | 4.4 | Monthly Withdrawal Range (GK) | P10/P50/P90 nominal monthly spending under guardrails |
 | 4.5 | SORR Stress Scenarios | Survival hit under three historical bad sequences |
-| 4.7 | Optimal Stock/Bond Allocation (sweep) | Best allocation across 20%–80% bonds, at the canonical bar |
+| 4.7 | Optimal Stock/Bond Allocation (sweep) | Best allocation across 10%–90% bonds, at the canonical bar |
 | 4.8 | Chained Accumulation → Decumulation | End-to-end joint probability with two thresholds (decum-min + accum income-formula) |
 | 4.9 | Withdrawal Rate Sensitivity | Survival vs SWR (2.0–4.0%) at current wealth |
 | 4.10 | Inflation × CAGR Sensitivity | 2D survival grid |
@@ -114,9 +114,9 @@ The MC return generator (`monte_carlo._generate_mc_returns`) draws **annual** st
 
 The engine supports two stock return generation methods, selected by `mc_return_method`:
 
-**Parametric** (`"parametric"`, default): Student-t distributed with `df = mc_stock_return_df` (config: 5.0 → fat tails). Mean = `planning_cagr` (or override). Std = `mc_stock_return_std_percent / 100`. Includes AR(1) mean reversion, Cholesky stock-bond correlation, and epistemic parameter uncertainty. Best for: exploring "worse than history" tail scenarios, sensitivity analysis with clean parameter control.
+**Parametric** (`"parametric"`, default): Student-t distributed with `df = mc_stock_return_df` (config: 5.0 → fat tails). Mean = the arithmetic mean that compounds at `planning_cagr` (see "Stock return input is a CAGR" below). Std = `mc_stock_return_std_percent / 100`. Includes AR(1) mean reversion, Cholesky stock-bond correlation, and epistemic parameter uncertainty. Best for: exploring "worse than history" tail scenarios, sensitivity analysis with clean parameter control.
 
-**Block bootstrap** (`"bootstrap"`): Circular block bootstrap from 99 years of spliced S&P 500 annual returns (SPY total return 1993–2026 + ^GSPC price-only 1928–1992 with a constant dividend adjustment from the overlap period). Draws contiguous blocks of `mc_bootstrap_block_size` years (default 5, capturing business-cycle persistence), wrapping at the array boundary. When `mc_bootstrap_mean_shift = true` (default), all bootstrapped returns are shifted by a constant so the sample mean matches `planning_cagr`, preserving variance/skewness/kurtosis/autocorrelation while targeting the user's assumed return level. Best for: realistic crash clustering, volatility regimes, and fat tails derived from actual market history rather than parametric assumptions.
+**Block bootstrap** (`"bootstrap"`): Circular block bootstrap from 99 years of spliced S&P 500 annual returns (SPY total return 1993–2026 + ^GSPC price-only 1928–1992 with a constant dividend adjustment from the overlap period). Draws contiguous blocks of `mc_bootstrap_block_size` years (default 5, capturing business-cycle persistence), wrapping at the array boundary. When `mc_bootstrap_mean_shift = true` (default), all bootstrapped returns are shifted by a constant so the paths compound at `planning_cagr` (the shift targets the arithmetic mean `cagr_to_arithmetic_mean(planning_cagr, σ_hist)`), preserving variance/skewness/kurtosis/autocorrelation while targeting the user's assumed return level. Best for: realistic crash clustering, volatility regimes, and fat tails derived from actual market history rather than parametric assumptions.
 
 Both methods produce identical output: `(stock_returns, inflations, bond_yields)` as three `(n_simulations, years)` arrays. All downstream code (decumulation loops, SORR patching, grids) works identically regardless of method.
 
@@ -124,13 +124,40 @@ Both methods produce identical output: `(stock_returns, inflations, bond_yields)
 
 ### Returns (parametric mode)
 
-- **Stocks**: Student-t distributed with `df = mc_stock_return_df` (config: 5.0 → fat tails). Mean = `planning_cagr` (or override). Std = `mc_stock_return_std_percent / 100`.
-- **Bonds**: Normal. Mean = `yield_bonds / 100`. Std = `mc_bond_yield_std_percent / 100`.
+- **Stocks**: Student-t distributed with `df = mc_stock_return_df` (config: 5.0 → fat tails). Std = `mc_stock_return_std_percent / 100`. Mean: see below.
+- **Bonds**: persistent, inflation-linked yield process (see "Bond yields" below). Long-run mean = `yield_bonds / 100`.
 - **Inflation**: Normal with AR(1) autocorrelation. Mean = `expected_inflation_percent / 100`. Std = `mc_inflation_std_percent / 100`. Persistence `phi = mc_inflation_ar1_phi` (config: 0.6, calibrated on historical CPI persistence).
+
+### Stock return input is a CAGR
+
+`expected_yearly_growth_stocks_percent` (and `--cagr`) is a **CAGR**: the median compounded growth rate, the same quantity Pillar 2 measures in its rolling-window analysis. A CAGR used directly as the arithmetic mean of annual returns compounds at only ≈ CAGR − σ²/2 (≈ 1.1 pp/yr at σ = 15%), so the engine converts it per path:
+
+    μ_arith = (1 + g) · sqrt(1 + σ² / (1 + μ_arith)²) − 1      (lognormal median rule, fixed-point solved)
+
+`g` = CAGR, `σ` = that path's volatility (after vol uncertainty). For g = 6%, σ = 15%: μ_arith ≈ 7.04%. Verified: median 30-year compounded growth of simulated paths = 6.00% in parametric, fat-tailed-with-uncertainty and bootstrap modes. `mc_stock_mean_is_cagr = false` restores the legacy convention (input used as arithmetic mean), which was ≈ 1 pp/yr more pessimistic than the stated CAGR. Implemented in `monte_carlo.cagr_to_arithmetic_mean`.
+
+### Bond yields
+
+Annual nominal bond yields follow
+
+    y_t = ȳ + β·(π_t − π̄) + u_t,      u_t = (1 − κ)·u_{t−1} + σ_y·ε_t,   u_{−1} = 0
+
+| Symbol | Config | Default | Meaning |
+|---|---|---|---|
+| ȳ | `yield_bonds` | — | Long-run mean yield |
+| σ_y | `mc_bond_yield_std_percent` | 0.7 | Std of the yearly rate shock |
+| κ | `mc_bond_yield_mean_reversion` | 0.15 | Yearly pull-back of the shock (1 = independent yields every year) |
+| β | `mc_bond_yield_inflation_beta` | 0.3 | Yield move per 1 pp inflation deviation |
+
+Bond return in decumulation = coupon (yield × principal, taxed) + price change −7 (duration) × Δyield. In accumulation bonds grow at that year's yield (no price effect).
+
+Calibration with the defaults (40k paths, inflation std 2%, φ = 0.6, duration 7): year-to-year yield autocorrelation ≈ 0.80; std of yearly yield changes ≈ 0.9 pp (EUR 10y: ≈ 0.8–1.0 pp); annual bond return volatility ≈ 6% (EUR aggregate bond indices: ≈ 5–6%); corr(inflation, yield) ≈ +0.4; P(yields rise > 2 pp over 5 years) ≈ 10%; P(yield < 0) ≈ 1.5%. Yields are floored at −1%.
+
+Why: the legacy model drew a fresh, independent yield every year (κ = 1, β = 0). That produced ±10%/yr bond price noise that reversed the next year, no multi-year rate regimes (a 2022-style rise was undone the following year), and no link between inflation and yields — so nominal bonds could not lose real value through the 1970s mechanism. `mc_bond_yield_mean_reversion = 1`, `mc_bond_yield_inflation_beta = 0` reproduce it.
 
 ### Correlations
 
-- **Stock–bond correlation**: `mc_stock_bond_correlation` (config: −0.2, typical hedge behavior). Applied via Cholesky decomposition during draws.
+- **Stock–bond correlation**: `mc_stock_bond_correlation` (config: −0.2, typical hedge behaviour) is the correlation between the stock shock and the bond **price** shock (= minus the yield shock), applied via Cholesky. Negative = bonds rise when stocks fall. Before October 2026 the sign was applied to the yield, so −0.2 actually made bond returns move *with* stocks. The measured stock/bond total-return correlation is ≈ −0.14 at −0.2: the inflation link and the coupon add variation that is not correlated with stocks. In bootstrap mode bonds are drawn independently of stocks.
 - **Stock return AR(1) phi**: `mc_stock_return_ar1_phi` (config: −0.25, empirical post-crash mean reversion).
 
 ### Parameter uncertainty (epistemic)
@@ -156,7 +183,8 @@ These two model the fact that historical estimates of mean and vol are themselve
 ### Glide path
 
 - `mc_decumulation_glide_years > 0` triggers a linear shift from the initial stock allocation to `mc_decumulation_glide_end_pct` over that many years.
-- Rebalancing happens annually after stock growth, before withdrawals.
+- Rebalancing to the target mix happens annually after growth, before withdrawals — the glide target when a glide is configured, otherwise the starting allocation. Withdrawals are then taken from stocks (bonds only once stocks are exhausted) and the next rebalance restores the mix.
+- Before October 2026 rebalancing ran only while a glide was active: a static allocation, or one whose start equals `mc_decumulation_glide_end_pct`, spent stocks first and kept bonds as a last-resort bucket. That made results jump at the grid point equal to the glide end (≈ −18 pp survival in a test case) and did not match the annually rebalanced portfolios of Trinity/Bengen. `_run_decum_loop(rebalance=False)` keeps the legacy behaviour available.
 
 ### Pension
 
@@ -218,6 +246,14 @@ Italian / Eurozone CPI shows positive serial correlation (high-inflation regimes
 
 Student-t with 5 degrees of freedom gives fat tails (kurtosis ≈ 9 vs Normal's 3). Captures crash days like 1987, 2020. `df → ∞` would be Normal; `df = 5` is a reasonable mid-tail-thickness for monthly-aggregated annual returns.
 
+### Why bond κ = 0.15, β = 0.3, σ_y = 0.7%?
+
+κ = 0.15 gives rate regimes a half-life of ≈ 4 years, so a rise persists for years as in 2022–2024 rather than reversing next year. β = 0.3 is a deliberately partial pass-through: yields react to inflation, but central banks and term premia dampen the response. σ_y = 0.7% then brings yearly yield changes (≈ 0.9 pp) and bond return volatility (≈ 6%) in line with EUR aggregate bonds. With the legacy σ_y = 1.0 the new process gives ≈ 7.6% bond volatility — still lower than the legacy ≈ 9%, but above the market range. The parameters are calibrated to these targets, not fitted to a yield series; fitting them to Bund yield history is an open improvement.
+
+### Why convert the CAGR instead of asking for an arithmetic mean?
+
+Pillar 2 measures CAGRs (rolling-window compounded growth), and people reason in CAGRs ("equities return ~6% a year"). Using that number as the arithmetic mean silently subtracts σ²/2 per year — about 1.1 pp at 15% vol, ~25% less terminal wealth over 30 years. Converting keeps the planning input and the simulated median consistent; any conservatism should be chosen explicitly via the CAGR, not hidden in the convention.
+
 ### Why GK multipliers `[0.85, 1.20]`?
 
 Standard Guyton-Klinger guardrails (2006 paper). 80% lower bound on portfolio → cut 10%; 120% upper → raise 10%; clipped to [85%, 120%] of the inflation-adjusted baseline. Tight enough to track inflation; loose enough to absorb a moderate drawdown.
@@ -240,7 +276,8 @@ Crucial for honest interpretation. The report's numbers assume **none of the fol
 
 - **Hyperinflation**: only the highest CPI row in §4.10 (4%) is meaningful; sustained 6%+ inflation isn't modelled.
 - **Negative real returns over decades** (1970s style): only partially captured by 2000-2002 patch.
-- **Multi-regime persistence**: a 10-year bear market isn't an SORR scenario.
+- **Multi-regime persistence**: a 10-year bear market isn't an SORR scenario. Stock returns have no regime switching or negative skew (Student-t is symmetric).
+- **Bond model limits**: fixed duration (7y), no credit spreads or defaults, no term-structure shape; parameters calibrated to stylised EUR facts rather than fitted to a yield series. SORR stress sequences shock stocks only — inflation and bond yields stay random in crash years.
 - **Black swans not in history**: regulatory chaos, currency collapse, war effects.
 - **Property crashes**: real estate doesn't appear anywhere.
 
@@ -332,7 +369,11 @@ If a number sounds reassuring (high preservation P, comfortable surplus), look a
 | Param | Default | Effect |
 |---|---|---|
 | `mc_stock_return_df` | 5.0 | Student-t degrees of freedom. Larger = thinner tails. |
-| `mc_stock_bond_correlation` | −0.2 | Cholesky correlation. 0 = independent. |
+| `mc_stock_bond_correlation` | −0.2 | Correlation of stock shock and bond **price** shock. Negative = hedge. |
+| `mc_stock_mean_is_cagr` | true | Stock input is a CAGR, converted to the arithmetic mean that compounds at it. false = legacy. |
+| `mc_bond_yield_std_percent` | 0.7 | Std of the yearly bond-yield shock (pp). |
+| `mc_bond_yield_mean_reversion` | 0.15 | κ — yearly pull-back of the yield shock. 1 = legacy independent yields. |
+| `mc_bond_yield_inflation_beta` | 0.3 | β — yield response to inflation deviation. 0 = no link. |
 | `mc_stock_return_ar1_phi` | −0.25 | AR(1) on stock returns. Negative = post-crash mean reversion. |
 | `mc_stock_mean_uncertainty` | 0.015 | Std of normal prior on CAGR (epistemic uncertainty). |
 | `mc_stock_vol_uncertainty` | 0.03 | Std of normal prior on vol (epistemic uncertainty). |
@@ -386,3 +427,38 @@ else:
 ```
 
 Survival rates appear only as a one-line footnote. Survival is a permissive bar; FI is not.
+
+---
+
+## 8. External validation — Trinity study and Bengen
+
+`tests/test_trinity_validation.py` runs the real decumulation engine with Trinity-era US assumptions (S&P 500 10.3% CAGR, σ 20%; bonds 5.2%; inflation 3.1%, σ 3%, φ 0.6), taxes, pension, glide path, fat tails and correlations switched off, a 4% inflation-adjusted withdrawal, 30 years.
+
+| Check | Engine (Oct 2026) | Published | Test |
+|---|---|---|---|
+| 4% / 50-50 / 30y survival | ≈ 93% | ≈ 95% (Cooley, Hubbard & Walz 1998) | band 88–97%, and ≤ 95% |
+| Highest rate with ≥ 95% MC survival | ≈ 3.75% | SAFEMAX ≈ 4.15% (Bengen 1994, all-windows worst case) | band 3.25–4.75% |
+| Survival falls with withdrawal rate and horizon | yes | yes | asserted |
+| 50/50 beats all-bonds | ≈ 93% vs ≈ 71% | yes | asserted, also with φ = 0 |
+| All-stocks vs 50/50 | ≈ 88% < 93% | stock-heavy at least as safe | **known limitation**, asserted |
+
+The first version (August 2026) gave ≈ 80% and attributed the gap to missing mean reversion. Changing one thing at a time showed it came from two engine conventions:
+
+| Setup | 4% / 50-50 / 30y |
+|---|---|
+| 10.3% used as arithmetic mean, no rebalancing (legacy) | 80.1% |
+| 10.3% treated as CAGR | 89.3% |
+| annual rebalancing | 86.2% |
+| both (current) | ≈ 93% |
+
+The remaining ≈ 2 points, and all-stocks ranking below 50/50, are plausibly the long-horizon mean reversion that independent annual draws lack. Bengen's SAFEMAX is a worst case over historical windows while the test uses a 95% MC quantile, so that check is a plausibility band, not a reproduction. Trinity's US 1926–1995 data is a favourable history; matching it is a calibration check of the engine, not evidence that 4% is safe for a European retiree today.
+
+### Changelog — October 2026 model update
+
+Three corrections, all with legacy switches:
+
+1. **Bond yields**: persistent, inflation-linked process (κ, β); stock–bond correlation sign fixed. Legacy: κ = 1, β = 0.
+2. **Stock input as CAGR**: converted to the compounding arithmetic mean. Legacy: `mc_stock_mean_is_cagr = false`.
+3. **Annual rebalancing** without a glide path. Legacy: `_run_decum_loop(rebalance=False)`.
+
+Plus the allocation search grid widened from 20–80% to 10–90% bonds. Direction of the effect on typical plans: survival and preservation probabilities rise, and the required wealth `W*` falls (in the regression fixture 6.10M → 3.42M). Changes 1 and 2 contribute roughly equally; change 3 matters only for configurations without a glide path or at the glide-end grid point. Run history from before this update is not comparable with runs after it.

@@ -304,17 +304,19 @@ class TestMonteCarlo:
         assert rich.success_rate_bond_only > baseline.success_rate_bond_only
 
     # --- fixed-seed golden values (regression guard) -----------------------
+    # Regenerated 2026-10 after the CAGR→arithmetic-mean conversion and the
+    # persistent bond-yield model (was: income 0.0635, stock 0.1815, P50 930,270).
     def test_golden_success_rate(self, mc_de):
         assert mc_de.success_rate == pytest.approx(0.0, abs=0.01)
 
     def test_golden_income_success_rate(self, mc_de):
-        assert mc_de.success_rate_income_only == pytest.approx(0.0635, abs=0.02)
+        assert mc_de.success_rate_income_only == pytest.approx(0.118, abs=0.02)
 
     def test_golden_stock_success_rate(self, mc_de):
-        assert mc_de.success_rate_stock_only == pytest.approx(0.1815, abs=0.03)
+        assert mc_de.success_rate_stock_only == pytest.approx(0.255, abs=0.03)
 
     def test_golden_median_portfolio(self, mc_de):
-        assert mc_de.final_portfolio_percentiles[50] == pytest.approx(930_270, rel=0.05)
+        assert mc_de.final_portfolio_percentiles[50] == pytest.approx(988_875, rel=0.05)
 
 
 # ---------------------------------------------------------------------------

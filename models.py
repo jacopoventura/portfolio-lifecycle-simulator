@@ -77,6 +77,7 @@ class Config:
     mc_stock_bond_correlation: float = 0.0    # corr(stock return, bond PRICE return); negative = bonds hedge
     mc_bond_yield_mean_reversion: float = 0.15  # κ: yearly pull-back of the rate shock (1 = legacy i.i.d. yields)
     mc_bond_yield_inflation_beta: float = 0.3   # β: yield move per 1pp inflation deviation (0 = no link)
+    mc_stock_mean_is_cagr: bool = True          # True: expected_yearly_growth_stocks_percent is a CAGR (median compounded growth); False: legacy arithmetic mean
     mc_stock_return_ar1_phi: float = 0.0      # AR(1) mean reversion (negative = post-crash recovery)
     mc_stock_mean_uncertainty: float = 0.0    # prior std on stock CAGR (epistemic uncertainty)
     mc_stock_vol_uncertainty: float = 0.0     # prior std on stock volatility (epistemic uncertainty)
@@ -178,6 +179,7 @@ class Config:
             mc_stock_bond_correlation=float(config.get("mc_stock_bond_correlation", 0.0)),
             mc_bond_yield_mean_reversion=float(config.get("mc_bond_yield_mean_reversion", 0.15)),
             mc_bond_yield_inflation_beta=float(config.get("mc_bond_yield_inflation_beta", 0.3)),
+            mc_stock_mean_is_cagr=bool(config.get("mc_stock_mean_is_cagr", True)),
             mc_stock_return_ar1_phi=float(config.get("mc_stock_return_ar1_phi", 0.0)),
             mc_stock_mean_uncertainty=float(config.get("mc_stock_mean_uncertainty", 0.0)),
             mc_stock_vol_uncertainty=float(config.get("mc_stock_vol_uncertainty", 0.0)),

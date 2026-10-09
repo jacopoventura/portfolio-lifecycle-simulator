@@ -48,6 +48,9 @@ confidence level.
 ## Example output
 
 Abridged from a real run on template figures — see `config.example.toml`.
+Generated before the October 2026 model update (CAGR-consistent stock returns,
+persistent bond yields, annual rebalancing); current runs show higher
+survival/preservation and a lower required wealth. See `METHODOLOGY.md` §8.
 
 ### S1 · Accumulation
 
@@ -133,7 +136,12 @@ Real-world CAGR distributions  (P5 = bad-luck entry, P50 = typical):
 ## Modelling
 
 - **Stochastic returns** — 50,000 paths; Student-t innovations for fat tails,
-  AR(1) inflation, correlated bond-yield shocks.
+  AR(1) inflation. The stock input is a **CAGR**: paths are generated so their
+  median compounded growth equals it (no hidden σ²/2 volatility drag).
+- **Bonds** — persistent, inflation-linked yields (rate regimes last years;
+  yields rise with inflation), coupon plus duration-based price changes, and a
+  stock–bond correlation defined on returns (negative = bonds hedge).
+- **Annual rebalancing** to the target mix (or along the glide path).
 - **Sequence-of-returns risk (SORR)** — every result is re-run against forced
   crash sequences (2000–2002, 2008–2009, synthetic year 1–5 crash) so early-loss
   vulnerability is visible rather than averaged away.
@@ -147,6 +155,10 @@ Real-world CAGR distributions  (P5 = bad-luck entry, P50 = typical):
 - **Taxation** — German (Vorabpauschale, Basiszins, Freibetrag,
   Teilfreistellung) and Italian regimes modelled separately, since they change
   the answer materially.
+- **External validation** — the decumulation engine is tested against the
+  Trinity study and Bengen: 4% / 50-50 / 30 years gives ≈ 93% survival vs the
+  published ≈ 95%. Details, and the remaining known limitation, in
+  `METHODOLOGY.md` §8.
 
 `METHODOLOGY.md` documents every assumption **and what the model deliberately
 does not capture**. Read it before trusting a number.
@@ -216,7 +228,7 @@ value. Flag form is the key with underscores replaced by hyphens
 |---|---|---|
 | `target_monthly_retirement_income` | € per month, **today's money** | Net income the portfolio must fund; inflated to the retirement date internally |
 | `years` | years, > 0 | Time from now until retirement (accumulation horizon) |
-| `expected_yearly_growth_stocks_percent` | % per year, e.g. `6` | Planning CAGR for equities, net of fund costs. Nominal, not real |
+| `expected_yearly_growth_stocks_percent` | % per year, e.g. `6` | Planning CAGR for equities (median compounded growth), net of fund costs. Nominal, not real. The engine converts it to the arithmetic mean that compounds at this rate |
 | `expected_inflation_percent` | % per year, e.g. `2.3` | Expected inflation; drives all real-terms conversions |
 | `bonds_percentage` | % of portfolio, `0`–`100` (**not** 0–1) | Bond share at retirement |
 | `yield_bonds` | % per year | Nominal bond yield, net of fund costs |

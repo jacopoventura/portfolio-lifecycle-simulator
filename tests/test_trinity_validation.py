@@ -24,10 +24,9 @@ planning tool that is more pessimistic than history is safe, one that is more
 optimistic is dangerous. The test asserts the result sits in the right region
 and reproduces the qualitative structure of the literature.
 
-Measured at the time of writing: 4% / 50/50 / 30y gives ~82% here against
-Trinity's ~95%. Switching `mc_return_method="bootstrap"` (block-resampled
-historical returns) moves it to ~85%, i.e. toward the published figure, which
-is consistent with mean reversion being the explanation for the gap.
+Measured (October 2026 engine): 4% / 50/50 / 30y gives ~93% here against
+Trinity's ~95%. The remaining ~2 points are plausibly the mean reversion that
+independent parametric draws lack.
 
 NEUTRALISED FOR THE COMPARISON
 ------------------------------
@@ -37,48 +36,55 @@ equity glide path, Student-t fat tails, and stock/bond correlation.
 Inflation persistence is deliberately NOT switched off — see FINDINGS below.
 
 Market assumptions are Trinity's 1926-1995 US figures: S&P 500 ≈ 10.3% nominal
-(σ ≈ 20%), high-grade corporate bonds ≈ 5.2%, inflation ≈ 3.1%.
+compounded (σ ≈ 20%), high-grade corporate bonds ≈ 5.2%, inflation ≈ 3.1%.
 
-FINDINGS (first run, August 2026)
----------------------------------
-1. LEVEL. 4% / 50-50 / 30y → ~82% survival against Trinity's ~95%. The gap is
-   attributable to the return process, not a defect: independent parametric
-   draws contain no mean reversion, so a bad decade is never followed by a
-   compensating one and sequence risk bites harder than it did historically.
-   Supporting evidence — switching `mc_return_method="bootstrap"` (block
-   resampling of real return sequences) moves the result to ~85%, i.e. toward
-   the published figure. The engine is therefore CONSERVATIVE relative to
-   history, which is the correct direction of error for a planning tool.
+FINDINGS
+--------
+1. THE FIRST RUN (August 2026) GAVE ~80%, AND THE CAUSE WAS SETUP, NOT THE
+   RETURN PROCESS. It was attributed to missing mean reversion. Re-running one
+   change at a time (October 2026) showed two engine conventions explained
+   most of the gap:
+
+       setup                                                   4% / 50-50 / 30y
+       10.3% used as ARITHMETIC mean, no rebalancing (old)           80.1%
+       10.3% treated as a CAGR (arith. mean ≈ 12.3%)                 89.3%
+       annual rebalancing to 50/50                                   86.2%
+       both (current engine)                                         ~93%
+       Trinity, published                                            95%
+
+   (a) A CAGR used as the arithmetic mean of annual returns compounds at
+       ~CAGR − σ²/2 (≈ 2pp/yr at σ = 20%). The engine now converts the input
+       CAGR to the arithmetic mean that compounds at it
+       (`mc_stock_mean_is_cagr`, default True; see cagr_to_arithmetic_mean).
+   (b) Without a glide path the loop used to never rebalance — "50/50" meant
+       spend stocks first, bonds as last resort. Trinity and Bengen rebalanced
+       annually; the engine now does too.
 
 2. THE PHI=0 TRAP. The first version of this file set
-   `mc_inflation_ar1_phi = 0` on the reasoning that Trinity did not model
-   inflation persistence. That inverted Trinity's central finding: an all-bond
-   portfolio came out SAFER than a balanced one. The arithmetic is sound given
-   the inputs — 5.2% nominal bonds against 3.1% inflation is a ~2.0% real
-   annuity, which funds a 4% real withdrawal for ~35 years — but it is not
-   true of real bonds. Sustained inflation is the mechanism that destroys
-   nominal bond portfolios over 30 years, and switching it off removed the
-   very risk the comparison exists to test.
+   `mc_inflation_ar1_phi = 0`, which made an all-bond portfolio look SAFER
+   than a balanced one — inverting Trinity's central finding. Inflation
+   persistence is what erodes nominal bonds over 30 years, so it stays on.
+   Under the current engine the inversion no longer appears even at phi=0
+   (all bonds ≈ 90% vs 50/50 ≈ 95%): stocks compound at the stated CAGR and
+   bond yields now rise with inflation (persistent, inflation-linked yield
+   model, see monte_carlo._generate_mc_returns).
 
-   Survival at 4% / 30y by allocation:
+   Survival at 4% / 30y by allocation, current engine:
 
-       inflation model        all bonds    50/50     all stocks
-       phi=0.0, sigma=2%        96.2%      83.1%       79.8%     <- inverted
-       phi=0.6, sigma=2%        84.1%      81.9%       79.1%
-       phi=0.6, sigma=3%        74.0%      80.1%       78.1%     <- Trinity's
-                                                                    ordering
+       all bonds    50/50     all stocks
+         ~71%       ~93%        ~88%
 
-   With historically realistic inflation persistence and volatility the engine
-   reproduces the published conclusion: a balanced portfolio beats both
-   extremes. That the AR(1) inflation model is what restores it is meaningful
-   validation of that component.
+3. MODEL LIMITATION STILL PRESENT. The engine ranks all-stocks BELOW 50/50,
+   whereas the Trinity tables show stock-heavy portfolios at least as safe as
+   50/50 at 4% / 30y. Independent annual draws have no long-horizon mean
+   reversion, so a 100%-stock path that starts badly never "earns it back" the
+   way historical sequences did. Asserted in TestKnownLimitations.
 
-3. MODEL LIMITATION EXPOSED. The bond leg is a nominal coupon carrying no
-   duration or credit risk; stochastic inflation is the only force eroding it.
-   Bond-heavy allocations therefore look safer here than the historical record
-   supports, and that bias grows as assumed inflation volatility falls. This
-   matters directly for any plan built on a high bond share. Asserted in
-   TestKnownLimitations so it cannot be silently forgotten.
+4. BENGEN. Bengen's SAFEMAX (~4.15%) is the rate that survived EVERY
+   historical 30-year window — a worst case over ~50 overlapping windows.
+   The test below uses the highest rate with ≥95% Monte Carlo survival,
+   which is a different statistic; it currently sits at ~3.75%. The band is
+   therefore a plausibility check, not a reproduction.
 """
 
 import pytest
@@ -87,7 +93,7 @@ from models import Config
 from monte_carlo import simulate_decumulation
 
 # ── Study parameters ─────────────────────────────────────────────────────────
-TRINITY_STOCK_CAGR_PCT = 10.3      # S&P 500, 1926-1995, nominal
+TRINITY_STOCK_CAGR_PCT = 10.3      # S&P 500, 1926-1995, nominal, compounded
 TRINITY_STOCK_STD_PCT = 20.0
 TRINITY_BOND_YIELD_PCT = 5.2       # long-term high-grade corporate bonds
 TRINITY_INFLATION_PCT = 3.1        # US CPI, same period
@@ -187,7 +193,7 @@ class TestPublishedLevels:
     def test_4pct_50_50_30y_sits_in_the_published_region(self):
         survival = _survival(4.0)
 
-        assert 0.75 <= survival <= 0.97, (
+        assert 0.88 <= survival <= 0.97, (
             f"4% / 50-50 / 30y gave {survival:.1%}; Trinity reports "
             f"{TRINITY_PUBLISHED_SUCCESS:.0%}. Outside this band the "
             f"discrepancy is too large to attribute to the return process."
@@ -207,7 +213,9 @@ class TestPublishedLevels:
             rate += 0.25
 
         assert safemax is not None, "no withdrawal rate reached 95% survival"
-        assert 2.5 <= safemax <= 6.0, (
+        # MC 95%-survival rate vs Bengen's all-windows worst case: related but
+        # not identical statistics (see FINDINGS 4), hence the band.
+        assert 3.25 <= safemax <= 4.75, (
             f"engine SAFEMAX = {safemax:.2f}%; Bengen reports "
             f"~{BENGEN_SAFEMAX_PCT}%"
         )
@@ -238,17 +246,37 @@ class TestKnownLimitations:
     updating — that is the point of encoding them.
     """
 
-    def test_without_inflation_persistence_bonds_look_too_safe(self):
-        # With phi=0 and low inflation volatility, the bond leg is effectively
-        # a deterministic ~2% real annuity, which funds a 4% real withdrawal
-        # for ~35 years — so an all-bond portfolio outranks a balanced one,
-        # contradicting the historical record. The engine's bond leg carries
-        # no duration or credit risk; only stochastic inflation erodes it.
+    def test_all_stocks_ranks_below_balanced(self):
+        # Historical sequences mean-revert over decades, so stock-heavy
+        # portfolios did at least as well as 50/50 at 4% / 30y. Independent
+        # annual draws do not mean-revert, so here all-stocks falls BELOW
+        # 50/50 (~88% vs ~93%). See FINDINGS 3.
+        all_stocks = _survival(4.0, stock_allocation=1.0)
+        balanced = _survival(4.0, stock_allocation=0.50)
+
+        assert all_stocks < balanced, (
+            "All-stocks no longer ranks below 50/50 — the return process may "
+            "now carry long-horizon mean reversion. Update METHODOLOGY.md and "
+            "this test."
+        )
+
+
+class TestResolvedArtifacts:
+    """Former known limitations, now fixed — kept so they cannot come back."""
+
+    def test_bonds_no_longer_look_safest_without_inflation_persistence(self):
+        # Used to fail the other way: with phi=0, all bonds (~96%) beat
+        # 50/50 (~83%). Resolved by the CAGR conversion, annual rebalancing
+        # and inflation-linked bond yields (October 2026).
         kwargs = dict(mc_inflation_ar1_phi=0.0, mc_inflation_std_percent=2.0)
         all_bonds = _survival(4.0, stock_allocation=0.0, **kwargs)
         balanced = _survival(4.0, stock_allocation=0.50, **kwargs)
 
-        assert all_bonds > balanced, (
-            "The all-bonds-look-safest artifact has disappeared — the bond "
-            "model may have been improved. Update METHODOLOGY.md and this test."
-        )
+        assert balanced > all_bonds
+
+    def test_legacy_conventions_reproduce_the_old_pessimism(self):
+        # The arithmetic-mean convention alone costs several points of survival.
+        legacy = _survival(4.0, mc_stock_mean_is_cagr=False)
+        current = _survival(4.0)
+
+        assert current - legacy > 0.04

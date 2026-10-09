@@ -73,6 +73,27 @@ _COMBINED_GRID_BOND_STEP = 500.0
 
 _VALID_RETURN_METHODS = {"parametric", "bootstrap"}
 
+# Bond-share grid searched by every "optimal allocation" routine. Spans 10–90%
+# so an optimum at the old 20%/80% edges is no longer an artefact of the grid.
+_BONDS_PCT_GRID: tuple[float, ...] = (0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90)
+
+
+def cagr_to_arithmetic_mean(cagr, std):
+    """Arithmetic mean of annual returns whose median compounded growth is `cagr`.
+
+    Lognormal approximation: if 1+r is lognormal with mean 1+μ and std σ, its
+    median (= long-run compounded growth) is (1+μ)/sqrt(1 + σ²/(1+μ)²). We
+    solve μ = (1+g)·sqrt(1 + σ²/(1+μ)²) − 1 by fixed-point iteration (converges
+    in a few steps). For g = 6%, σ = 15% this gives μ ≈ 7.04% (≈ g + σ²/2).
+    Works elementwise on scalars or numpy arrays.
+    """
+    g = np.asarray(cagr, dtype=float)
+    sd = np.asarray(std, dtype=float)
+    mu = g + 0.5 * sd ** 2
+    for _ in range(8):
+        mu = (1.0 + g) * np.sqrt(1.0 + sd ** 2 / (1.0 + mu) ** 2) - 1.0
+    return mu if mu.ndim else float(mu)
+
 # Lower bound on simulated nominal bond yields. EUR 10y Bunds bottomed near
 # −0.9% (2019–2020); −1% keeps negative-rate regimes possible but bounded.
 _BOND_YIELD_FLOOR = -0.01
@@ -113,6 +134,7 @@ def _generate_mc_returns(
     bootstrap_mean_shift: bool = True,
     bond_yield_mean_reversion: float = 1.0,
     bond_yield_inflation_beta: float = 0.0,
+    stock_mean_is_cagr: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Draw (stock_returns, inflations, bond_yields), each (n_simulations, years).
 
@@ -127,15 +149,26 @@ def _generate_mc_returns(
     the legacy model: independent yield levels drawn fresh every year. Those
     are the function defaults (back-compat for direct callers); config-driven
     callers pass the Config values.
+
+    `stock_mean` is either the arithmetic mean of annual returns
+    (stock_mean_is_cagr=False, legacy) or a CAGR, i.e. the median compounded
+    growth rate (True). In the CAGR case it is converted per path to the
+    arithmetic mean that compounds at that rate given the path's volatility
+    (see `cagr_to_arithmetic_mean`), so a 6% CAGR input really compounds at
+    ~6% instead of ~6% − σ²/2.
     """
     shape = (n_simulations, years)
 
     # ── Stock returns: bootstrap or parametric ───────────────────────────────
     if bootstrap_annual_returns is not None:
+        target_mean = stock_mean
+        if stock_mean_is_cagr:
+            target_mean = float(cagr_to_arithmetic_mean(
+                stock_mean, float(np.std(bootstrap_annual_returns))))
         stock_returns = block_bootstrap_returns(
             rng, bootstrap_annual_returns, n_simulations, years,
             block_size=bootstrap_block_size,
-            target_mean=stock_mean if bootstrap_mean_shift else None,
+            target_mean=target_mean if bootstrap_mean_shift else None,
         )
     else:
         # AR(1) mean reversion in z-space: z_t = φ·z_{t-1} + √(1−φ²)·ε_t
@@ -173,6 +206,10 @@ def _generate_mc_returns(
             eff_std = np.maximum(rng.normal(stock_std, stock_vol_uncertainty, (n_simulations, 1)), 0.01)
         else:
             eff_std = stock_std
+        if stock_mean_is_cagr:
+            # Per path: the arithmetic mean that compounds at the drawn CAGR
+            # given that path's own volatility.
+            eff_mean = cagr_to_arithmetic_mean(eff_mean, eff_std)
 
         # Student-t fat tails for stocks when df < 100 (preserves target std)
         if stock_return_df < 100.0:
@@ -278,6 +315,7 @@ def _setup_mc(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -1462,12 +1500,15 @@ def _run_decum_loop(
     return_final_portfolios: bool = False,
     bond_duration_years: float = _DECUM_BOND_DURATION_YEARS,
     initial_bond_yield: float | None = None,
+    rebalance: bool = True,
 ) -> DecumulationResult:
     """Core decumulation year-loop. All simulation work is vectorised.
 
     Glide path: when glide_years > 0, stock allocation linearly shifts from the
     initial fraction toward stock_pct_end over glide_years years, then stays fixed.
-    Annual rebalancing runs after stock growth, before withdrawals.
+    Annual rebalancing to the target mix (glide target, or the starting mix
+    without a glide) runs after growth, before withdrawals. rebalance=False
+    restores the legacy stocks-first behaviour when no glide is active.
 
     Bond mark-to-market: each year bond principal is multiplied by
     (1 − duration × Δy). Δy is the year-over-year change in the yield draw,
@@ -1483,6 +1524,12 @@ def _run_decum_loop(
     stock_pct_start = float(initial_stock_v[0] / initial_total) if initial_total > 0 else 0.0
     stock_allocation = stock_pct_start
     _glide_active = glide_years > 0 and stock_pct_end >= 0.0 and stock_pct_end != stock_pct_start
+    # Rebalance every year to the target mix: the glide-path target when a
+    # glide is configured, otherwise the starting allocation. (Before 2026-10
+    # rebalancing ran only with an active glide; a static or glide-end == start
+    # allocation then spent stocks first and kept bonds as a last-resort bucket,
+    # which made results jump at the grid point equal to the glide end.)
+    _rebalance = rebalance or _glide_active
 
     if initial_bond_yield is None:
         initial_bond_yield = float(np.mean(annual_bond_yields[:, 0])) if n_years > 0 else 0.0
@@ -1522,9 +1569,12 @@ def _run_decum_loop(
         cum_inf = cum_inf * (1.0 + annual_inflations[:, year])
 
         # 3b. Glide path rebalancing (after growth, before withdrawals)
-        if _glide_active:
-            progress = min(year + 1, glide_years) / glide_years
-            target_frac = stock_pct_start + (stock_pct_end - stock_pct_start) * progress
+        if _rebalance:
+            if _glide_active:
+                progress = min(year + 1, glide_years) / glide_years
+                target_frac = stock_pct_start + (stock_pct_end - stock_pct_start) * progress
+            else:
+                target_frac = stock_pct_start
             total_v = stock_v + bond_v
             rebalance_mask = alive & (total_v > 0.0)
             stock_v = np.where(rebalance_mask, total_v * target_frac, stock_v)
@@ -1658,6 +1708,7 @@ def simulate_decumulation(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -1759,6 +1810,7 @@ def compute_sorr_scenarios(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -1830,7 +1882,7 @@ def compute_allocation_sweep(
     rates reflect allocation differences, not Monte Carlo noise.
     """
     if bonds_pct_values is None:
-        bonds_pct_values = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+        bonds_pct_values = list(_BONDS_PCT_GRID)
 
     # Effective tax on stock withdrawals. Conservative default: 65% gain fraction.
     if effective_stock_tax_rate is None:
@@ -1864,6 +1916,7 @@ def compute_allocation_sweep(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -1979,6 +2032,7 @@ def compute_chained_mc(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -2030,6 +2084,7 @@ def compute_chained_mc(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -2144,6 +2199,7 @@ def compute_swr_sweep(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -2212,7 +2268,7 @@ def compute_wealth_preservation_under_sorr(
     if end_wealth_ratios is None:
         end_wealth_ratios = [0.50, 0.60, 0.70, 0.80, 0.90, 1.00, 1.10]
     if bonds_pct_grid is None:
-        bonds_pct_grid = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+        bonds_pct_grid = list(_BONDS_PCT_GRID)
 
     current_bonds = config.bonds_percentage / 100.0
     if not any(abs(b - current_bonds) < 1e-6 for b in bonds_pct_grid):
@@ -2234,6 +2290,7 @@ def compute_wealth_preservation_under_sorr(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -2373,7 +2430,7 @@ def compute_canonical_fi_required_scan(
     if preserve_ratios is None:
         preserve_ratios = [0.50, 0.60, 0.70, 0.80, 0.90, 1.00]
     if bonds_pct_grid is None:
-        bonds_pct_grid = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+        bonds_pct_grid = list(_BONDS_PCT_GRID)
 
     current_bonds = config.bonds_percentage / 100.0
     if not any(abs(b - current_bonds) < 1e-6 for b in bonds_pct_grid):
@@ -2398,6 +2455,7 @@ def compute_canonical_fi_required_scan(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -2749,7 +2807,7 @@ def compute_two_bucket_required_wealth(
     if preserve_ratio is None:
         preserve_ratio = config.fi_preservation_ratio
     if bonds_pct_grid is None:
-        bonds_pct_grid = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+        bonds_pct_grid = list(_BONDS_PCT_GRID)
 
     current_bonds = config.bonds_percentage / 100.0
     if not any(abs(b - current_bonds) < 1e-6 for b in bonds_pct_grid):
@@ -2786,6 +2844,7 @@ def compute_two_bucket_required_wealth(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -2881,6 +2940,7 @@ def compute_survival_matrix(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -3001,6 +3061,7 @@ def compute_crash_timing_matrix(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -3186,7 +3247,7 @@ def compute_focused_preservation_table(
     if preserve_ratio is None:
         preserve_ratio = config.fi_preservation_ratio
     if bonds_pct_grid is None:
-        bonds_pct_grid = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+        bonds_pct_grid = list(_BONDS_PCT_GRID)
     if monthly_stock_contribution is None:
         monthly_stock_contribution = (
             config.annual_net_saving / 12.0 * config.stock_monthly_investment_pct
@@ -3232,6 +3293,7 @@ def compute_focused_preservation_table(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -3466,6 +3528,7 @@ def _accumulation_per_year_wealth(
         stock_bond_corr=config.mc_stock_bond_correlation,
         bond_yield_mean_reversion=config.mc_bond_yield_mean_reversion,
         bond_yield_inflation_beta=config.mc_bond_yield_inflation_beta,
+        stock_mean_is_cagr=config.mc_stock_mean_is_cagr,
         stock_return_ar1_phi=config.mc_stock_return_ar1_phi,
         stock_mean_uncertainty=config.mc_stock_mean_uncertainty,
         stock_vol_uncertainty=config.mc_stock_vol_uncertainty,
@@ -3603,6 +3666,7 @@ def compute_years_to_retirement_tradeoff(
             stock_bond_corr=cfg_year.mc_stock_bond_correlation,
             bond_yield_mean_reversion=cfg_year.mc_bond_yield_mean_reversion,
             bond_yield_inflation_beta=cfg_year.mc_bond_yield_inflation_beta,
+            stock_mean_is_cagr=cfg_year.mc_stock_mean_is_cagr,
             stock_return_ar1_phi=cfg_year.mc_stock_return_ar1_phi,
             stock_mean_uncertainty=cfg_year.mc_stock_mean_uncertainty,
             stock_vol_uncertainty=cfg_year.mc_stock_vol_uncertainty,
@@ -3701,6 +3765,7 @@ def compute_years_to_retirement_tradeoff(
             stock_bond_corr=cfg_year.mc_stock_bond_correlation,
             bond_yield_mean_reversion=cfg_year.mc_bond_yield_mean_reversion,
             bond_yield_inflation_beta=cfg_year.mc_bond_yield_inflation_beta,
+            stock_mean_is_cagr=cfg_year.mc_stock_mean_is_cagr,
             stock_return_ar1_phi=cfg_year.mc_stock_return_ar1_phi,
             stock_mean_uncertainty=cfg_year.mc_stock_mean_uncertainty,
             stock_vol_uncertainty=cfg_year.mc_stock_vol_uncertainty,

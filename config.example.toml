@@ -11,7 +11,7 @@
 target_monthly_retirement_income = 2500.0  # <-- EDIT ME: monthly income in retirement (today's money)
 years = 20   # <-- EDIT ME: investment horizon in years
 expected_inflation_percent = 2.3
-expected_yearly_growth_stocks_percent = 6  # net of TER (baseline / "optimistic" assumption)
+expected_yearly_growth_stocks_percent = 6  # CAGR (median compounded growth), net of TER
 # To plan with a different CAGR (e.g. when CAPE realism flags 6% as optimistic),
 # pass --cagr 4 on the command line; not a config setting (per-run only).
 bonds_percentage = 50.0
@@ -43,7 +43,9 @@ fast_mc = false  # true = 10% of every MC's n_simulations + ~10x coarser grid st
 mc_n_simulations = 50000
 mc_stock_return_std_percent = 15.0
 mc_inflation_std_percent = 2.0
-mc_bond_yield_std_percent = 1.0   # ann. std of yield innovations (~hist. EUR 10y ≈ 80–100 bps)
+mc_bond_yield_std_percent = 0.7   # std of the yearly yield shock; with κ/β below → yearly Δyield ≈ 0.9pp, bond return vol ≈ 6%
+mc_bond_yield_mean_reversion = 0.15  # κ: yearly pull-back of the yield shock (1 = legacy independent yields)
+mc_bond_yield_inflation_beta = 0.3   # β: yield move per 1pp inflation deviation (0 = no link)
 mc_target_success_percent = 95  # integer, e.g. 90, 95, 99
 mc_grid_cagr_min = 0.03        # minimum CAGR shown in grid tables
 mc_grid_cagr_max = 0.09        # maximum CAGR shown in grid tables
@@ -105,7 +107,8 @@ bayesian_shrink_mean       = 0.5            # James-Stein mean shrinkage intensi
 
 # Return distribution (P7 + P8 + P9-extra)
 mc_stock_return_df = 5.0            # Student-t degrees of freedom (large = normal, 5 = fat tails)
-mc_stock_bond_correlation = -0.2    # stock/bond return correlation (0=independent, negative=typical hedge)
+mc_stock_bond_correlation = -0.2    # corr(stock shock, bond PRICE shock); negative = bonds hedge (measured total-return corr ≈ -0.14)
+mc_stock_mean_is_cagr = true        # true: the stock growth input is a CAGR and is converted to the compounding arithmetic mean
 mc_stock_return_ar1_phi = -0.25     # AR(1) mean reversion (-0.25 = empirical post-crash recovery)
 mc_stock_mean_uncertainty = 0.015   # epistemic uncertainty on CAGR prior (std in decimal, e.g. 0.015 = ±1.5pp)
 mc_stock_vol_uncertainty = 0.03     # epistemic uncertainty on volatility prior (std in decimal, e.g. 0.03 = ±3pp)
